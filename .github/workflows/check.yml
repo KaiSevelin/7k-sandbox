@@ -1,0 +1,34 @@
+name: check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      # The sandbox depends on a sibling checkout of the language repository while
+      # Core's shape is still settling. A published dependency replaces this once the
+      # sandbox stops demanding changes to Core.
+      - uses: actions/checkout@v4
+        with:
+          repository: KaiSevelin/7k
+          path: 7K
+      - uses: actions/checkout@v4
+        with:
+          path: 7k-sandbox
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install
+        working-directory: 7K
+      - run: npm install
+        working-directory: 7k-sandbox
+      - run: npm run typecheck
+        working-directory: 7k-sandbox
+      # Includes the corpus test, which runs the language repository's own examples.
+      # `7k check` proves they parse; only this proves they behave as they assert.
+      - run: npm test
+        working-directory: 7k-sandbox

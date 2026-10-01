@@ -1,0 +1,9 @@
+# Byte-exact round-tripping is a hard requirement (docs/spec/20-ir.md section 7.2),
+# so line endings must not vary by platform. Everything in this repo is LF.
+* text=auto eol=lf
+
+# 7K sources and the spec they are checked against: LF, always.
+*.7k   text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.ts   text eol=lf
