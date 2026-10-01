@@ -7,13 +7,7 @@
  * than merely document.
  */
 
-import {
-  isDirective,
-  type JsonValue,
-  type Operand,
-  type Predicate,
-} from "@sevenk/core";
-import type { Rng } from "./clock.js";
+import { isDirective, type JsonValue, type Operand, type Predicate } from "@sevenk/core";
 import type { VirtualTime } from "./clock.js";
 
 export type Claims = Readonly<Record<string, JsonValue>>;
@@ -94,6 +88,10 @@ function valueOf(operand: Operand, message: Message): JsonValue | JsonValue[] | 
 }
 
 const same = (a: JsonValue | undefined, b: JsonValue | undefined): boolean => {
+  // Absent is not equal to absent. A comparison needs two values, and
+  // `claim.tid == envelope.tenantId` holding because a sender presented neither
+  // would be the wrong answer in the one place it matters most.
+  if (a === undefined || b === undefined) return false;
   if (a === b) return true;
   // A decimal travels as a string, so `19.99` and `"19.99"` are the same value
   // (`docs/spec/01-kernel.md` section 7.1).
@@ -103,6 +101,10 @@ const same = (a: JsonValue | undefined, b: JsonValue | undefined): boolean => {
 };
 
 const compare = (op: string, a: JsonValue | undefined, b: JsonValue | undefined): boolean => {
+  // Every comparison needs both sides, including `!=`: "absent differs from absent"
+  // is as unfounded as "absent equals absent".
+  if (a === undefined || b === undefined) return false;
+
   switch (op) {
     case "==":
       return same(a, b);
@@ -171,69 +173,4 @@ export function evaluate(predicate: Predicate, message: Message): boolean {
       return compare(predicate.op, left as JsonValue, right as JsonValue);
     }
   }
-}
-
-// ---- generator directives ---------------------------------------------------
-
-/**
- * Resolves canonical-JSON generator directives (`docs/spec/01-kernel.md` section
- * 7.5). Only a runtime can: `$auto` needs the seed, `$now` needs the clock.
- *
- * `$invalid` deliberately produces a value that violates its field's constraints,
- * because testing a rejection path is otherwise impossible.
- */
-export function resolveDirectives(value: JsonValue, rng: Rng, now: VirtualTime): JsonValue {
-  if (Array.isArray(value)) return value.map((v) => resolveDirectives(v, rng, now));
-
-  if (value !== null && typeof value === "object") {
-    if (isDirective(value)) {
-      switch (value.directive) {
-        case "auto":
-          return rng.uuid();
-        case "now": {
-          const offset = typeof value.args === "string" ? value.args : "";
-          return new Date(now + offsetMs(offset)).toISOString();
-        }
-        case "range": {
-          const bounds = Array.isArray(value.args) ? value.args : [];
-          const low = Number(bounds[0] ?? 0);
-          const high = Number(bounds[1] ?? low);
-          return low + rng.int(high - low + 1);
-        }
-        case "repeat": {
-          const args = value.args as Record<string, JsonValue>;
-          const rawCount = args.value ?? args;
-          const count = Number(resolveDirectives(rawCount as JsonValue, rng, now));
-          const of = args.of ?? "";
-          return Array.from({ length: Number.isFinite(count) ? count : 0 }, () =>
-            resolveDirectives(of, rng, now),
-          );
-        }
-        case "example":
-          return "";
-        case "invalid":
-          // A long string violates a length constraint; the engine does not need
-          // to know which constraint it was asked to break.
-          return "x".repeat(4096);
-        default:
-          return "";
-      }
-    }
-
-    const out: Record<string, JsonValue> = {};
-    for (const [k, v] of Object.entries(value as Record<string, JsonValue>)) {
-      out[k] = resolveDirectives(v, rng, now);
-    }
-    return out;
-  }
-
-  return value;
-}
-
-/** `+15m`, `-2h`, `15m`. */
-function offsetMs(text: string): number {
-  const m = /^([+-]?)(\d+)(ms|s|m|h|d)$/.exec(text.trim());
-  if (m === null) return 0;
-  const unit = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[m[4]!]!;
-  return (m[1] === "-" ? -1 : 1) * Number(m[2]) * unit;
 }

@@ -22,14 +22,7 @@ export {
   type VirtualTime,
 } from "./clock.js";
 
-export {
-  evaluate,
-  readPath,
-  resolveDirectives,
-  type Claims,
-  type Envelope,
-  type Message,
-} from "./message.js";
+export { evaluate, readPath, type Claims, type Envelope, type Message } from "./message.js";
 
 export {
   Trace,
