@@ -24,6 +24,7 @@ import {
   type LinkedModel,
   type MessageIr,
   type ScheduleIr,
+  type SendIr,
   type ServiceIr,
 } from "@sevenk/core";
 import { isCronProblem, knownZone, nextFiring, parseCron, type Cron } from "./cron.js";
@@ -58,6 +59,7 @@ interface Armed {
   readonly zone: string;
   readonly service: ServiceIr;
   readonly message: MessageIr;
+  readonly send: SendIr;
   /** The envelope id of the occurrence in flight, if any. */
   inFlight?: string | undefined;
   /** When the in-flight occurrence was published, for the overrun report. */
@@ -106,8 +108,9 @@ export class Schedules {
       return;
     }
 
-    const message = decl.send === undefined ? undefined : this.host.model.declFor(decl.send);
-    if (message === undefined || message.kind !== "message") {
+    const send = decl.send;
+    const message = send === undefined ? undefined : this.host.model.declFor(send.message);
+    if (send === undefined || message === undefined || message.kind !== "message") {
       this.host.note(`\`${name}\` declares no \`send\`, so there is nothing to fire`);
       return;
     }
@@ -134,6 +137,7 @@ export class Schedules {
       zone: decl.timezone,
       service,
       message,
+      send,
       missed: [],
       fired: 0,
     });
@@ -214,13 +218,14 @@ export class Schedules {
   }
 
   private fire(armed: Armed, at: VirtualTime): void {
-    const { body, generated } = this.host.fill(armed.message, {}, at);
+    const written = this.payload(armed, at);
+    const { body, generated } = this.host.fill(armed.message, written, at);
     if (generated.length > 0 && armed.fired === 0) {
       // Once per schedule, not once per occurrence: an hourly job would say it 8760 times.
       this.host.note(
         `\`${qualify(armed.decl.id)}\` sends \`${qualify(armed.message.id)}\` with ` +
-          `${generated.map((g) => `\`${g}\``).join(", ")} generated: a schedule carries no state to ` +
-          "fill them from",
+          `${generated.map((g) => `\`${g}\``).join(", ")} generated: not named in the \`send\`, and a ` +
+          "schedule carries no state to fill them from",
       );
     }
 
@@ -241,6 +246,57 @@ export class Schedules {
     armed.inFlight = id;
     armed.inFlightSince = this.host.now();
     this.watching.set(id, armed);
+  }
+
+  /**
+   * The body a `send` block asks for, read against the occurrence.
+   *
+   * `occurrence.due` is the instant it was **scheduled for** and `occurrence.date` that
+   * instant's civil date in the schedule's own timezone. Neither is `$now`: a catch-up
+   * fires late, so a settlement job told to use the current date would settle the wrong
+   * day — which is exactly the bug `onMissed all` otherwise introduces.
+   */
+  private payload(armed: Armed, due: VirtualTime): Record<string, JsonValue> {
+    const out: Record<string, JsonValue> = {};
+
+    for (const assign of armed.send.assigns) {
+      const target = assign.target[0];
+      if (target === undefined || assign.target.length > 1) continue;
+      const source = assign.source;
+
+      if (source.from === "literal") {
+        out[target] = source.value;
+        continue;
+      }
+      if (source.from !== "occurrence") {
+        // `state` belongs to a saga and `message` to an `on` action; a schedule has
+        // neither. A model error the checker should catch, reported rather than invented.
+        this.host.note(
+          `\`${qualify(armed.decl.id)}\` reads \`${source.from}\` in its \`send\`, which a schedule ` +
+            "has no access to; only `occurrence` and a literal are available",
+        );
+        continue;
+      }
+
+      switch (source.path[0]) {
+        case "due":
+          out[target] = new Date(due).toISOString();
+          break;
+        case "date":
+          // Civil, in the declared zone: `2026-03-29` means that date there, whatever
+          // the UTC instant happens to be.
+          out[target] = new Intl.DateTimeFormat("sv-SE", { timeZone: armed.zone }).format(due);
+          break;
+        default:
+          this.host.note(
+            `\`${qualify(armed.decl.id)}\` reads \`occurrence.${source.path.join(".")}\`, which is not ` +
+              "a thing an occurrence has; it has `due` and `date`",
+          );
+          break;
+      }
+    }
+
+    return out;
   }
 
   /**

@@ -214,6 +214,92 @@ describe("onMissed", () => {
   });
 });
 
+describe("an occurrence's payload", () => {
+  const dated = (policy: string, assign: string, extra = ""): string => `
+package t
+
+message Settle v1.0 @command {
+  day:  date @role(businessKey)
+  when: instant
+}
+
+pipe commands : queue
+
+service Ledger {
+  emits Settle to commands
+
+  reacts Settle from commands {
+    once per none
+    replies none${extra}
+  }
+}
+
+schedule Nightly {
+  every    "0 1 * * *" in "UTC"
+  send     Settle { ${assign} }
+  onMissed ${policy}
+}
+`;
+
+  it("reads the instant the occurrence was due", async () => {
+    const result = await run(dated("all", "when = occurrence.due"), scenario(`  advance 2d`));
+    expect(
+      result.trace.of("published").map((e) => e.body?.when),
+    ).toEqual(["2026-01-01T01:00:00.000Z", "2026-01-02T01:00:00.000Z"]);
+  });
+
+  it("reads the civil date in the schedule's own timezone, not UTC's", async () => {
+    // 01:00 UTC is 02:00 in Stockholm on the same date, but 20:00 the *previous* day in
+    // New York -- which is the point of the zone being declared.
+    const ny = dated("all", "day = occurrence.date").replace('in "UTC"', 'in "America/New_York"');
+    const result = await run(ny, scenario(`  advance 2d`));
+    // 01:00 New York time, so the dates are the local ones.
+    expect(result.trace.of("published").map((e) => e.body?.day)).toEqual([
+      "2026-01-01",
+      "2026-01-02",
+    ]);
+  });
+
+  it("gives a catch-up the day it was due, not the day it ran", async () => {
+    // The first occurrence hangs long enough that two more fall due behind it, so the
+    // backlog is worked through on a later date than the one it settles.
+    const model = dated("all", "day = occurrence.date", "\n    retry 0");
+    const result = await run(
+      model,
+      scenario(`  mock Ledger { on Settle hang }\n  advance 5d`),
+      undefined,
+      // A hang is only a hang for as long as nothing acknowledges it.
+      { ackTimeoutMs: 50 * 3_600_000 },
+    );
+
+    const settled = result.trace
+      .of("published")
+      .map((e) => ({ ran: e.iso.slice(0, 10), due: e.body?.day }));
+
+    // At least one occurrence was published on a later date than the day it settles,
+    // which is exactly the bug `$now` would have introduced.
+    expect(settled.some((x) => x.ran !== x.due)).toBe(true);
+    // And every day is settled once, under its own date.
+    expect(new Set(settled.map((x) => x.due)).size).toBe(settled.length);
+  });
+
+  it("says so rather than guessing when a send reads something a schedule has not got", async () => {
+    const result = await run(
+      dated("all", "when = state.anything"),
+      scenario(`  advance 1d`),
+    );
+    expect(result.notes.join(" ")).toMatch(/reads `state` in its `send`/);
+  });
+
+  it("names a part of an occurrence that does not exist", async () => {
+    const result = await run(
+      dated("all", "when = occurrence.whenever"),
+      scenario(`  advance 1d`),
+    );
+    expect(result.notes.join(" ")).toMatch(/not a thing an occurrence has/);
+  });
+});
+
 describe("what a runtime must refuse to guess", () => {
   it("says so when a timezone is missing rather than defaulting to UTC", async () => {
     const source = model("0 2 * * *", "all").replace(' in "Europe/Stockholm"', "");

@@ -89,16 +89,17 @@ service Shipping {
 
 saga Flow v1.0 {
   start on Place keyed by orderId {
-    amount = message.amount
+    total = message.amount
   }
 
   state {
-    amount:   int { range 1..1000 }
+    total:    int { range 1..1000 }
     chargeId: uuid
   }
 
   step charge {
-    send Charge
+    // The amount is held as 'total', so a name match cannot reach it.
+    send Charge { amount = state.total }
     on Charged  { chargeId = message.chargeId }
     on Declined reject "card declined"
     on timeout 30s reject "payment timed out"
@@ -176,7 +177,7 @@ ${place("O-2")}
       scenario(`${HAPPY}
   at 0s publish Place as Caller { orderId: "O-3", amount: 77 }
   advance 1s
-  expect saga Flow["O-3"].amount == 77`),
+  expect saga Flow["O-3"].total == 77`),
     );
 
     expect(result.status).toBe("pass");
@@ -421,6 +422,125 @@ ${place("O-18")}
     const result = await run(MODEL, scenario(`${HAPPY}\n${place("O-19")}\n  advance 1s`));
     expect(result.trace.of("saga-compensating")).toEqual([]);
     expect(countOf(result, "saga-completed")).toBe(1);
+  });
+});
+
+describe("a send's payload", () => {
+  it("carries a field a name match cannot reach", async () => {
+    const result = await run(
+      MODEL,
+      scenario(`${HAPPY}
+  at 0s publish Place as Caller { orderId: "O-23", amount: 42 }
+  advance 1s`),
+    );
+
+    const charge = result.trace.of("published").find((e) => e.message === "t.Charge");
+    expect(charge?.body?.amount).toBe(42);
+    // Nothing had to be invented, so nothing is reported.
+    expect(result.notes.join(" ")).not.toMatch(/generated/);
+  });
+
+  it("still fills the business key and a matching name without being asked", async () => {
+    const result = await run(
+      MODEL,
+      scenario(`${HAPPY}
+  at 0s publish Place as Caller { orderId: "O-24", amount: 7 }
+  advance 1s`),
+    );
+
+    const charge = result.trace.of("published").find((e) => e.message === "t.Charge");
+    // `orderId` is the message's business key and takes the instance key; the block said
+    // nothing about it.
+    expect(charge?.body?.orderId).toBe("O-24");
+  });
+
+  it("lets the block win over a name match", async () => {
+    const model = MODEL.replace(
+      "    send Charge { amount = state.total }",
+      "    send Charge { amount = 999 }",
+    );
+    const result = await run(
+      model,
+      scenario(`${HAPPY}
+  at 0s publish Place as Caller { orderId: "O-25", amount: 7 }
+  advance 1s`),
+    );
+
+    const charge = result.trace.of("published").find((e) => e.message === "t.Charge");
+    expect(charge?.body?.amount).toBe(999);
+  });
+
+  it("reports a field it had to invent, naming it", async () => {
+    const model = MODEL.replace("    send Charge { amount = state.total }", "    send Charge");
+    const result = await run(
+      model,
+      scenario(`${HAPPY}
+  at 0s publish Place as Caller { orderId: "O-26", amount: 7 }
+  advance 1s`),
+    );
+
+    expect(result.notes.join(" ")).toMatch(/sends `t\.Charge` with `amount` generated/);
+  });
+
+  it("carries the reject reason onto the terminal message", async () => {
+    const model = MODEL.replace(
+      "  on reject   send Failed",
+      "  on reject   send Failed { why = terminal.reason }",
+    ).replace(
+      "message Failed    v1.0 @event { orderId: Ref @role(businessKey) }",
+      "message Failed    v1.0 @event { orderId: Ref @role(businessKey) why: string { length 1..60 } }",
+    );
+
+    const result = await run(
+      model,
+      scenario(`${HAPPY}
+  mock Payments { on Charge reply Declined after 100ms
+                  on Refund reply Refunded }
+  at 0s publish Place as Caller { orderId: "O-27", amount: 7 }
+  advance 1s`),
+    );
+
+    const failed = result.trace.of("published").find((e) => e.message === "t.Failed");
+    // `reject "card declined"` would be decoration if nothing could read it back.
+    expect(failed?.body?.why).toBe("card declined");
+  });
+
+  it("reads the terminal state as well as its reason", async () => {
+    const model = MODEL.replace(
+      "  on complete send Done",
+      "  on complete send Done { why = terminal.state }",
+    ).replace(
+      "message Done      v1.0 @event { orderId: Ref @role(businessKey) }",
+      "message Done      v1.0 @event { orderId: Ref @role(businessKey) why: string { length 1..60 } }",
+    );
+
+    const result = await run(
+      model,
+      scenario(`${HAPPY}
+  at 0s publish Place as Caller { orderId: "O-28", amount: 7 }
+  advance 1s`),
+    );
+
+    expect(result.trace.of("published").find((e) => e.message === "t.Done")?.body?.why).toBe(
+      "complete",
+    );
+  });
+
+  it("says so rather than guessing when a state field is not set yet", async () => {
+    // `chargeId` is only recorded by `on Charged`, so reading it in the step's own send is
+    // a read-before-assign -- `state-unset`, once the checker reports it.
+    const model = MODEL.replace(
+      "    send Charge { amount = state.total }",
+      "    send Charge { amount = state.chargeId }",
+    );
+    const result = await run(
+      model,
+      scenario(`${HAPPY}
+  at 0s publish Place as Caller { orderId: "O-29", amount: 7 }
+  advance 1s`),
+    );
+
+    expect(result.notes.join(" ")).toMatch(/`amount` unset: state\.chargeId held no value/);
   });
 });
 

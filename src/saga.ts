@@ -34,12 +34,13 @@ import {
   type MessageIr,
   type SagaAction,
   type SagaIr,
+  type SendIr,
   type ServiceIr,
   type StepIr,
   type Terminal,
 } from "@sevenk/core";
 import type { ScheduledEvent, VirtualTime } from "./clock.js";
-import type { Claims, Message } from "./message.js";
+import { readPath, type Claims, type Message } from "./message.js";
 import { fieldSpec, validate } from "./schema.js";
 import type { TraceEvent } from "./trace.js";
 
@@ -105,6 +106,14 @@ export interface Instance {
 }
 
 const instanceKey = (saga: SagaIr, key: string): string => `${qualify(saga.id)}\u0000${key}`;
+
+/** `state.total`, for a diagnostic that has to name what it could not read. */
+const showSource = (a: AssignIr): string => {
+  const source = a.source;
+  if (source.from === "literal") return JSON.stringify(source.value);
+  if (source.from === "absent") return "absent";
+  return `${source.from}.${source.path.join(".")}`;
+};
 
 export class Sagas {
   private readonly instances = new Map<string, Instance>();
@@ -181,7 +190,7 @@ export class Sagas {
     // route its first send, so a partly-written model still runs.
     const firstSend = saga.steps[0]?.send;
     if (firstSend === undefined) return undefined;
-    const sendId = this.host.model.resolve(firstSend);
+    const sendId = this.host.model.resolve(firstSend.message);
     return services.find((s) =>
       s.emits.some((e) => {
         const id = this.host.model.resolve(e.message);
@@ -344,26 +353,46 @@ export class Sagas {
   }
 
   private sendStep(instance: Instance, step: StepIr): void {
-    const message = this.messageOf(step.send);
-    if (message === undefined) return;
-    this.dispatch(instance, message, `step ${step.name}`);
+    if (step.send !== undefined) this.dispatch(instance, step.send, `step ${step.name}`);
   }
 
   /**
    * Sends one of the saga's messages, filling its body from the instance.
    *
-   * A field carrying the message's own `@role(businessKey)` takes the instance key —
-   * which is what makes the eventual reply correlate back to this instance — and any
-   * other field takes a state field of the same name. Whatever is left is generated, and
-   * the runtime says which, because a quietly invented payment amount is worse than a
-   * noisy one.
+   * Three sources in order of authority. What the `send` block says wins, because the
+   * author said it. Then the message's own `@role(businessKey)` field takes the instance
+   * key — which is what makes the eventual reply correlate back — and any other field
+   * takes a state field of the same name. Whatever is still missing is generated, and the
+   * runtime says which, because a quietly invented payment amount is worse than a noisy
+   * one.
    */
-  private dispatch(instance: Instance, message: MessageIr, why: string): void {
+  private dispatch(instance: Instance, send: SendIr, why: string): void {
     const service = this.hosts.get(qualify(instance.saga.id));
     if (service === undefined) return;
 
+    const decl = this.host.model.declFor(send.message);
+    if (decl === undefined || decl.kind !== "message") return;
+    const message = decl;
+
     const written: Record<string, JsonValue> = {};
+
+    // What the author wrote.
+    for (const assign of send.assigns) {
+      const target = assign.target[0];
+      if (target === undefined || assign.target.length > 1) continue;
+      const value = this.readFor(instance, assign);
+      if (value !== undefined) written[target] = value;
+      else {
+        this.host.note(
+          `\`${qualify(instance.saga.id)}\` sends \`${qualify(message.id)}\` with ` +
+            `\`${target}\` unset: ${showSource(assign)} held no value at this point`,
+        );
+      }
+    }
+
+    // Then what the model already says.
     for (const field of message.fields) {
+      if (written[field.name] !== undefined) continue;
       if (field.role === "businessKey") {
         written[field.name] = instance.key;
         continue;
@@ -378,8 +407,8 @@ export class Sagas {
     if (generated.length > 0) {
       this.host.note(
         `\`${qualify(instance.saga.id)}\` sends \`${qualify(message.id)}\` with ` +
-          `${generated.map((g) => `\`${g}\``).join(", ")} generated: no state field of that name and ` +
-          "not the message's business key",
+          `${generated.map((g) => `\`${g}\``).join(", ")} generated: not named in the \`send\`, ` +
+          "no state field of that name, and not the message's business key",
       );
     }
 
@@ -394,12 +423,6 @@ export class Sagas {
           `\`${qualify(instance.saga.id)}\` has no pipe to send on`,
       );
     }
-  }
-
-  private messageOf(ref: SagaIr["steps"][number]["send"]): MessageIr | undefined {
-    if (ref === undefined) return undefined;
-    const decl = this.host.model.declFor(ref);
-    return decl?.kind === "message" ? decl : undefined;
   }
 
   /** Applies an `on` clause's action. */
@@ -458,6 +481,42 @@ export class Sagas {
     }
   }
 
+  /**
+   * Reads a send's source against the instance.
+   *
+   * There is no message in hand, so `state` and a literal are what a saga can read.
+   * `occurrence` belongs to a schedule, and `message`, `envelope` and `claim` to an `on`
+   * action — naming one here is a model error the checker should catch, and until it does
+   * the runtime leaves the field unset and says so rather than inventing a reading.
+   */
+  private readFor(instance: Instance, a: AssignIr): JsonValue | undefined {
+    const source = a.source;
+    if (source.from === "absent") return undefined;
+    if (source.from === "literal") return source.value;
+    if (source.from === "envelope") {
+      return readPath(instance.envelope as JsonValue, source.path);
+    }
+
+    // The terminal that ended the saga. Only a terminal `send` has one, and reading it
+    // from a step's send yields nothing — a model error the checker should catch.
+    if (source.from === "terminal") {
+      if (instance.status === "running") return undefined;
+      if (source.path[0] === "state") return instance.status;
+      if (source.path[0] === "reason") return instance.reason;
+      return undefined;
+    }
+
+    if (source.from !== "state") return undefined;
+
+    return source.path.reduce<JsonValue | undefined>(
+      (acc, segment) =>
+        acc !== null && acc !== undefined && typeof acc === "object" && !Array.isArray(acc)
+          ? (acc as Record<string, JsonValue>)[segment]
+          : undefined,
+      instance.state as JsonValue,
+    );
+  }
+
   private sourceOf(a: AssignIr, message: Message): JsonValue | undefined {
     const source = a.source;
     if (source.from === "absent") return undefined;
@@ -508,10 +567,10 @@ export class Sagas {
 
     if (terminal !== "complete") this.unwind(instance);
 
-    const send = instance.saga.terminals.find((t) => t.on === terminal);
-    if (send === undefined) return;
-    const message = this.host.model.declFor(send.send);
-    if (message?.kind === "message") this.dispatch(instance, message, `on ${terminal}`);
+    // The status and reason are already set above, so a terminal `send` reading
+    // `terminal.reason` sees the reason that ended this instance.
+    const terminalSend = instance.saga.terminals.find((t) => t.on === terminal);
+    if (terminalSend !== undefined) this.dispatch(instance, terminalSend.send, `on ${terminal}`);
   }
 
   private unwind(instance: Instance): void {
@@ -527,10 +586,10 @@ export class Sagas {
       }
       if (step.undo === undefined) continue;
 
-      const message = this.host.model.declFor(step.undo);
+      const message = this.host.model.declFor(step.undo.message);
       if (message?.kind !== "message") continue;
       this.trace(instance, "saga-compensating", { message: qualify(message.id), detail: name });
-      this.dispatch(instance, message, `undo of ${name}`);
+      this.dispatch(instance, step.undo, `undo of ${name}`);
     }
   }
 

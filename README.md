@@ -57,6 +57,7 @@ And the Process layer:
 
 | It models | Because |
 |---|---|
+| a `send`'s payload, from `state`, `occurrence` and `terminal` | a step that cannot say the charge is for the order total cannot describe a correct saga |
 | saga instances keyed by business key | two messages with the same key reach the same instance, which is what makes a duplicate start idempotent |
 | steps, their `on` actions and their state | the checker can prove `chargeId` is set before an `undo` reads it, and so can a run |
 | step timeouts and the saga `deadline` | one bounds a wait, the other bounds the process; a saga with neither is unbounded |
@@ -170,7 +171,7 @@ debugger or a graph view needs to watch one message move at a time.
 
 ```
 npm install
-npm test        # 125 tests
+npm test        # 137 tests
 npm run build
 npx tsx src/cli.ts run ../7K/examples/soldout.scenario.7k
 ```
@@ -192,26 +193,16 @@ this runtime was an example that checked out and was still wrong.
 
 ## What it cannot do yet
 
-**A `send` has no payload.** The Process layer names the message a step or a schedule sends and has
-no way to say what goes in it, so the body is derived: the message's `@role(businessKey)` field takes
-the instance key — which is what makes the reply correlate back — any other field takes a `state` field
-of the same name, and the rest is generated. Every generated field is named in the run's notes, because
-a quietly invented payment amount is worse than a noisy one:
-
-```
-note: `acme.shop.Checkout` sends `acme.shop.ChargeCard` with `amount` generated:
-      no state field of that name and not the message's business key
-```
-
-A schedule has no state at all, so `SettleDay.day` is the day the occurrence *ran* rather than the day
-it was *due*. See the open questions in the language repository's `docs/decisions.md`.
-
 **The saga analyses are not implemented.** `04-process.md` specifies `unhandled-outcome`,
 `unbounded-step`, `uncompensated`, `state-unset`, `saga-liveness`, `saga-key-missing`,
 `saga-key-mismatch`, `timeout-under-deadline` and `saga-cycle`. Those are the checker's work rather
-than the runtime's, and `7k check` does not yet report any of them. The runtime notices some of the
-same things while running — an unbounded step shows up as a stuck instance — but noticing at runtime is
-not the same as refusing at check time.
+than the runtime's, and `7k check` does not yet report any of them. This runtime notices some of the
+same things while running — an unbounded step shows up as a stuck instance, and a `send` reading a
+state field nothing has set yet is reported where it happens — but noticing at run time is not the
+same as refusing at check time.
+
+**Invariants are not evaluated.** A `message` may declare one and Core drops it on the way to the
+IR, so neither the checker nor this runtime enforces it.
 
 ## Licence
 
