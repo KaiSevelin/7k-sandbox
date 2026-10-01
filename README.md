@@ -193,16 +193,9 @@ this runtime was an example that checked out and was still wrong.
 
 ## What it cannot do yet
 
-**The saga analyses are not implemented.** `04-process.md` specifies `unhandled-outcome`,
-`unbounded-step`, `uncompensated`, `state-unset`, `saga-liveness`, `saga-key-missing`,
-`saga-key-mismatch`, `timeout-under-deadline` and `saga-cycle`. Those are the checker's work rather
-than the runtime's, and `7k check` does not yet report any of them. This runtime notices some of the
-same things while running — an unbounded step shows up as a stuck instance, and a `send` reading a
-state field nothing has set yet is reported where it happens — but noticing at run time is not the
-same as refusing at check time.
-
-**Invariants are not evaluated.** A `message` may declare one and Core drops it on the way to the
-IR, so neither the checker nor this runtime enforces it.
+**Invariants are not evaluated.** A `message` may declare one — `invariant total.currency ==
+lines[].unit.currency` — and Core drops it on the way to the IR, so neither the checker nor this runtime
+enforces it. A generated fixture will happily produce a total in one currency and lines in another.
 
 ## Licence
 

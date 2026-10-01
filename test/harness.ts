@@ -6,7 +6,7 @@
  * which is exactly the class of divergence this package exists to avoid.
  */
 
-import { buildWorkspace, hasErrors, type LinkedModel, type Scenario, type ScenarioFile } from "@sevenk/core";
+import { buildWorkspace, type LinkedModel, type Scenario, type ScenarioFile } from "@sevenk/core";
 import { expect } from "vitest";
 import { runScenario, type RunOptions, type ScenarioResult } from "../src/runner.js";
 
@@ -16,19 +16,28 @@ export interface Built {
   readonly scenarios: readonly Scenario[];
 }
 
-/** Builds a model plus one scenario file, failing the test if either does not check out. */
-export function build(model: string, scenarios: string): Built {
+/**
+ * Builds a model plus one scenario file, failing the test if either does not check out.
+ *
+ * `allowed` names diagnostic codes the source is *expected* to produce. A test needs it
+ * only to exercise the runtime's own defence against a model the checker would refuse —
+ * reading state nothing has assigned, or a step nothing can end. Those are worth keeping
+ * covered, because a runtime may be handed a model it did not check itself, but the test
+ * should say out loud that the model is invalid rather than look like an oversight.
+ */
+export function build(model: string, scenarios: string, allowed: readonly string[] = []): Built {
   const workspace = buildWorkspace([
     { path: "model.7k", source: model },
     { path: "test.scenario.7k", source: scenarios },
   ]);
 
-  const errors = workspace.diagnostics.filter((d) => d.severity === "error");
+  const errors = workspace.diagnostics.filter(
+    (d) => d.severity === "error" && !allowed.includes(d.code),
+  );
   expect(
     errors.map((d) => `${d.span.file}: ${d.code}: ${d.message}`),
     "the test's own 7K source must check out",
   ).toEqual([]);
-  expect(hasErrors(workspace.diagnostics)).toBe(false);
 
   const file = workspace.scenarios[0];
   if (file === undefined) throw new Error("no scenario file was lowered");
@@ -42,8 +51,9 @@ export async function run(
   scenarios: string,
   name?: string,
   options: RunOptions = {},
+  allowed: readonly string[] = [],
 ): Promise<ScenarioResult> {
-  const built = build(model, scenarios);
+  const built = build(model, scenarios, allowed);
   const scenario =
     name === undefined ? built.scenarios[0] : built.scenarios.find((s) => s.name === name);
   if (scenario === undefined) throw new Error(`no scenario named ${name ?? "(first)"}`);

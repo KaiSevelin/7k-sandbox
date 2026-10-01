@@ -538,6 +538,11 @@ describe("a send's payload", () => {
       scenario(`${HAPPY}
   at 0s publish Place as Caller { orderId: "O-29", amount: 7 }
   advance 1s`),
+      undefined,
+      {},
+      // `state-unset`: the checker refuses this model, which is the better place to catch
+      // it. The runtime still has to behave when handed one it did not check itself.
+      ["state-unset"],
     );
 
     expect(result.notes.join(" ")).toMatch(/`amount` unset: state\.chargeId held no value/);
@@ -597,6 +602,11 @@ ${place("O-21")}
 ${place("O-22")}
   advance 1s
   expect no stuck saga Flow`),
+      undefined,
+      {},
+      // `saga-liveness`: the checker refuses a step nothing can end. This is the runtime's
+      // backstop for a model that reached it unchecked.
+      ["saga-liveness"],
     );
 
     expect(result.status).toBe("fail");
