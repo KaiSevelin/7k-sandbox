@@ -53,6 +53,20 @@ export {
 } from "./schema.js";
 
 export {
+  firingsBetween,
+  isCronProblem,
+  knownZone,
+  nextFiring,
+  parseCron,
+  type Cron,
+  type CronProblem,
+} from "./cron.js";
+
+export { Sagas, type Instance, type SagaHost } from "./saga.js";
+
+export { Schedules, type ScheduleHost } from "./schedule.js";
+
+export {
   Engine,
   versionAccepted,
   type EngineOptions,
