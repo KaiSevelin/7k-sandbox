@@ -107,6 +107,47 @@ ${send}
     expect(countOf(result, "delivered")).toBe(3);
   });
 
+  it("honours a version range, which a pin-only reading got wrong", async () => {
+    // `accepts v1.x` admits a v1.1 message. The runtime used to read the clause's text with
+    // a regular expression and `v1.x` reaches it as `v1 . x`, so every range silently
+    // matched nothing; Core lowers it to a value now and both ask the same question.
+    const model = MODEL_WITH_SENDER.replace(
+      "message Work v1.0 @command {",
+      "message Work v1.1 @command {",
+    ).replace("reacts Work from commands {", `reacts Work from commands {
+    accepts v1.x`);
+
+    const result = await run(
+      model,
+      scenario(`  mock Worker { on Work reply Done }
+${send}
+  advance 1s
+  expect Done on events`),
+    );
+
+    expect(result.status).toBe("pass");
+    expect(countOf(result, "filtered")).toBe(0);
+  });
+
+  it("filters a version the subscription pins away from", async () => {
+    const model = MODEL_WITH_SENDER.replace(
+      "message Work v1.0 @command {",
+      "message Work v1.1 @command {",
+    ).replace("reacts Work from commands {", `reacts Work from commands {
+    accepts v1.0`);
+
+    const result = await run(
+      model,
+      scenario(`  mock Worker { on Work reply Done }
+${send}
+  advance 1s
+  expect no Done on events`),
+    );
+
+    expect(result.status).toBe("pass");
+    expect(result.trace.of("filtered")[0]?.detail).toContain("accepts v1.0");
+  });
+
   it("does not deliver what a `where` filter declines, and never retries it", async () => {
     const model = MODEL_WITH_SENDER.replace(
       "reacts Done from events { replies none }",

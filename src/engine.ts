@@ -25,9 +25,12 @@
  */
 
 import {
+  admits,
   effectiveMocks,
+  parseVersion,
   qualify,
   RETRY_DEFAULT,
+  showAccepts,
   symbolKey,
   type JsonValue,
   type LinkedModel,
@@ -493,12 +496,16 @@ export class Engine {
 
     // `accepts v1.0` pins a subscription to a version, so a later one is not
     // delivered rather than delivered and misread.
-    if (
-      s.react.accepts !== undefined &&
-      message.envelope.version !== undefined &&
-      !versionAccepted(s.react.accepts, message.envelope.version)
-    ) {
-      return skip("version", `accepts ${s.react.accepts}, message is v${message.envelope.version}`);
+    if (s.react.accepts !== undefined && message.envelope.version !== undefined) {
+      const version = parseVersion(message.envelope.version);
+      // Core decides what a range admits, because the checker asks the same question of the
+      // same clause and two answers would be one too many (D73).
+      if (version !== undefined && !admits(s.react.accepts, version)) {
+        return skip(
+          "version",
+          `accepts ${showAccepts(s.react.accepts)}, message is v${message.envelope.version}`,
+        );
+      }
     }
 
     if (s.react.where !== undefined && !evaluate(s.react.where, message)) {
@@ -1048,20 +1055,4 @@ export class Engine {
   get pending(): number {
     return this.queue.size;
   }
-}
-
-/** `accepts v1.0`, `accepts 1.x`, `accepts 1.2..2.0` against a message's version. */
-export function versionAccepted(accepts: string, version: string): boolean {
-  const want = accepts.replace(/^v/, "").trim();
-  const [major, minor] = version.split(".");
-
-  if (want.endsWith(".x")) return want.slice(0, -2) === major;
-
-  const span = want.split("..");
-  if (span.length === 2 && span[0] !== "" && span[1] !== "") {
-    const n = Number(`${major}.${minor}`);
-    return n >= Number(span[0]) && n <= Number(span[1]);
-  }
-
-  return want === `${major}.${minor}` || want === major;
 }

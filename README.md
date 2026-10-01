@@ -171,7 +171,7 @@ debugger or a graph view needs to watch one message move at a time.
 
 ```
 npm install
-npm test        # 137 tests
+npm test        # 139 tests
 npm run build
 npx tsx src/cli.ts run ../7K/examples/soldout.scenario.7k
 ```

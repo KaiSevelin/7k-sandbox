@@ -68,7 +68,6 @@ export { Schedules, type ScheduleHost } from "./schedule.js";
 
 export {
   Engine,
-  versionAccepted,
   type EngineOptions,
   type Handler,
   type HandlerResult,
