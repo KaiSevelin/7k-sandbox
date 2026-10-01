@@ -312,22 +312,17 @@ export async function runScenario(
     }
   }
 
-  // Whatever is still in flight after the last step runs out, so the trace is
-  // complete: a dead-letter that was one backoff away should still show up.
-  await engine.runToQuiescence();
+  // Whatever is still in flight after the last step runs out, so the trace is complete:
+  // a dead-letter that was one backoff away should still show up. Recurring schedule
+  // timers are left alone — a schedule fires because the scenario advanced past it.
+  await engine.settle();
 
-  // A scenario that asserts about a saga is a claim about the saga, and this runtime
-  // stops at the Topology layer. Its message assertions are reported as they came out,
-  // but the scenario as a whole is `unsupported` rather than failed: most of what did
-  // not happen did not happen because the saga never ran, and reporting that as red
-  // would point at the topology for a gap in the runtime.
-  const judgesASaga = assertions.some((a) => a.status === "unsupported");
-
-  const status: Status = judgesASaga
-    ? "unsupported"
-    : errors.length > 0 || assertions.some((a) => a.status === "fail")
+  const status: Status =
+    errors.length > 0 || assertions.some((a) => a.status === "fail")
       ? "fail"
-      : "pass";
+      : assertions.some((a) => a.status === "unsupported")
+        ? "unsupported"
+        : "pass";
 
   return {
     name: scenario.name,
@@ -348,7 +343,6 @@ function judge(engine: Engine, model: LinkedModel, pkg: string, expect: Expect):
   const text = render(expect);
   const pass = (): AssertionResult => ({ status: "pass", text });
   const fail = (detail: string): AssertionResult => ({ status: "fail", text, detail });
-  const unsupported = (detail: string): AssertionResult => ({ status: "unsupported", text, detail });
 
   const events = engine.trace.all();
 
@@ -441,13 +435,60 @@ function judge(engine: Engine, model: LinkedModel, pkg: string, expect: Expect):
       );
     }
 
-    // Sagas are the Process layer, and this runtime stops at Topology. Reported
-    // rather than skipped: an assertion that silently passes is worse than one that
-    // says it was not checked.
-    case "sagaState":
-    case "sagaCount":
-    case "noStuckSaga":
-      return unsupported("this runtime does not yet run sagas");
+    case "sagaState": {
+      const instances = engine.sagaRuntime?.of(expect.saga) ?? [];
+      const instance = instances.find((i) => i.key === expect.key);
+      if (instance === undefined) {
+        return fail(
+          instances.length === 0
+            ? `no instance of \`${expect.saga}\` was started`
+            : `no instance keyed \`${expect.key}\`; there is ${instances
+                .map((i) => `\`${i.key}\``)
+                .join(", ")}`,
+        );
+      }
+
+      // `state` is the lifecycle: the step the instance is waiting in, or the terminal
+      // state it reached. Any other property reads a declared `state` field, so an
+      // assertion can check what the saga recorded as well as where it got to.
+      const actual =
+        expect.property.toLowerCase() === "state"
+          ? engine.sagaRuntime!.stateOf(instance)
+          : instance.state[expect.property];
+
+      if (actual === undefined) {
+        return fail(`\`${expect.property}\` is not set on this instance`);
+      }
+      // Names are case-insensitive in 7K (D40), and both sides here are names.
+      return String(actual).toLowerCase() === expect.value.toLowerCase()
+        ? pass()
+        : fail(`found ${JSON.stringify(actual)}`);
+    }
+
+    case "sagaCount": {
+      // Instances, whatever their status. The point of the assertion is that a duplicate
+      // start did not create a second instance, and counting only live ones would answer
+      // that differently depending on whether the saga happened to finish first — so an
+      // assertion about duplication would silently become an assertion about duration.
+      // `expect no stuck saga` is the separate question about liveness.
+      const instances = engine.sagaRuntime?.of(expect.saga) ?? [];
+      return instances.length === expect.count
+        ? pass()
+        : fail(`expected ${expect.count}, found ${instances.length}`);
+    }
+
+    case "noStuckSaga": {
+      const stuck = (engine.sagaRuntime?.of(expect.saga) ?? []).filter((i) =>
+        engine.sagaRuntime!.stuck(i),
+      );
+      return stuck.length === 0
+        ? pass()
+        : fail(
+            `${stuck.length} stuck: ${stuck
+              .map((i) => `\`${i.key}\` in ${engine.sagaRuntime!.stateOf(i)}`)
+              .join(", ")}`,
+          );
+    }
   }
 }
 

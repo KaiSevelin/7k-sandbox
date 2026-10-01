@@ -32,7 +32,29 @@ export type TraceKind =
   /** Lost: an `at-most-once` pipe, so there is nowhere for it to go. */
   | "dropped"
   /** The clock moved. */
-  | "advanced";
+  | "advanced"
+  // ---- the Process layer ----------------------------------------------------
+  /** A saga instance was created by its start message. */
+  | "saga-started"
+  /** A start message arrived for a key that already had an instance. */
+  | "saga-redundant-start"
+  /** An awaited message reached the instance and its step's action ran. */
+  | "saga-advanced"
+  /** A step waited longer than its declared timeout. */
+  | "saga-timeout"
+  | "saga-completed"
+  | "saga-rejected"
+  | "saga-abandoned"
+  /** A completed step's inverse was sent while unwinding. */
+  | "saga-compensating"
+  /** A completed step declared `undo none`, so unwinding skipped it. */
+  | "saga-irreversible"
+  /** A schedule fired an occurrence. */
+  | "schedule-fired"
+  /** An occurrence came due while the previous one was still in flight. */
+  | "schedule-overrun"
+  /** Occurrences a gap swallowed, resolved by `onMissed`. */
+  | "schedule-missed";
 
 /** The closed set a `reason` may take, so `expect rejected ... reason x` can match. */
 export type TraceReason =
@@ -66,6 +88,11 @@ export interface TraceEvent {
   readonly reason?: TraceReason;
   readonly detail?: string;
   readonly envelope?: Readonly<Record<string, JsonValue>>;
+  /** The saga a Process-layer event belongs to, qualified. */
+  readonly saga?: string;
+  /** The instance key, which is not the correlation id (`04-process.md` 1.1). */
+  readonly sagaKey?: string;
+  readonly schedule?: string;
   readonly body?: Readonly<Record<string, JsonValue>>;
   readonly claims?: Claims;
 }
@@ -98,11 +125,15 @@ export class Trace {
     return this.events
       .map((e) => {
         const where =
-          e.pipe === undefined
-            ? ""
-            : e.subscription === undefined
-              ? ` ${e.pipe}`
-              : ` ${e.pipe} -> ${e.subscription}`;
+          e.saga !== undefined
+            ? ` ${e.saga}["${e.sagaKey ?? ""}"]`
+            : e.schedule !== undefined
+              ? ` ${e.schedule}`
+              : e.pipe === undefined
+                ? ""
+                : e.subscription === undefined
+                  ? ` ${e.pipe}`
+                  : ` ${e.pipe} -> ${e.subscription}`;
         const extra = [
           e.message,
           e.attempt === undefined ? undefined : `attempt ${e.attempt}`,
@@ -111,7 +142,7 @@ export class Trace {
         ]
           .filter((x) => x !== undefined)
           .join(" ");
-        return `${String(e.at).padStart(14)}  ${e.kind.padEnd(13)} ${extra}${where}`;
+        return `${String(e.at).padStart(14)}  ${e.kind.padEnd(19)} ${extra}${where}`;
       })
       .join("\n");
   }

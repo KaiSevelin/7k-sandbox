@@ -49,24 +49,46 @@ describe.skipIf(!present)("the 7K examples", () => {
     expect(Date.now() - started).toBeLessThan(30_000);
   });
 
-  it("reports the shop's saga scenarios as unchecked rather than as failures", async () => {
+  it("runs the shop's sagas green, both directions of the compensation pair", async () => {
     const report = await run([resolve(EXAMPLES, "shop.scenario.7k")]);
     const results = report.files.flatMap((f) => f.scenarios);
 
-    // Sagas are the Process layer, and this runtime stops at Topology. Saying so is
-    // the point: an assertion that silently passed would be worse than a red one.
-    expect(results.filter((r) => r.status === "fail")).toEqual([]);
-    expect(results.filter((r) => r.status === "unsupported").map((r) => r.name)).toEqual([
-      "CheckoutSucceeds",
-      "CardDeclinedRefundsNothing",
-      "ShipmentRejectedRefundsCharge",
-      "PaymentNeverAnswers",
-      "DuplicatePlaceOrder",
-    ]);
+    const failures = results
+      .filter((r) => r.status !== "pass")
+      .map((r) => `${r.name}: ${r.errors.join("; ")} ${r.assertions
+        .filter((a) => a.status !== "pass")
+        .map((a) => `${a.text} -> ${a.detail ?? a.status}`)
+        .join("; ")}`);
+    expect(failures).toEqual([]);
+    expect(results).toHaveLength(8);
 
-    // The one scenario that is purely about the Topology layer is judged for real.
-    const authorization = results.find((r) => r.name === "PlaceOrderForSomeoneElse");
-    expect(authorization?.status).toBe("pass");
+    // The pair that makes a saga trustworthy: compensation runs for a step that completed
+    // and must not run for one that did not (`04-process.md` 1.4).
+    const refunded = results.find((r) => r.name === "ShipmentRejectedRefundsCharge")!;
+    const declined = results.find((r) => r.name === "CardDeclinedRefundsNothing")!;
+    expect(refunded.trace.of("saga-compensating").map((e) => e.message)).toEqual([
+      "acme.shop.RefundCard",
+    ]);
+    expect(declined.trace.of("saga-compensating")).toEqual([]);
+  });
+
+  it("drives the shop's nightly schedule, overrun and catch-up included", async () => {
+    const report = await run([resolve(EXAMPLES, "shop.scenario.7k")]);
+    const results = report.files.flatMap((f) => f.scenarios);
+
+    const nightly = results.find((r) => r.name === "NightlyCloseRunsEachDay")!;
+    expect(nightly.status).toBe("pass");
+    expect(nightly.trace.of("schedule-fired")).toHaveLength(3);
+    expect(nightly.trace.of("schedule-overrun")).toEqual([]);
+
+    // A close still retrying when the next is due: the occurrence is missed, and
+    // `onMissed all` works through the backlog rather than losing a day's settlement.
+    const slow = results.find((r) => r.name === "SlowCloseBacksUp")!;
+    expect(slow.status).toBe("pass");
+    expect(slow.trace.of("schedule-overrun")).toHaveLength(1);
+    expect(slow.trace.of("schedule-missed").map((e) => e.detail)).toEqual([
+      "1 missed, onMissed all",
+    ]);
   });
 
   it("produces a trace that is identical across runs, so a seed is a bug report", async () => {

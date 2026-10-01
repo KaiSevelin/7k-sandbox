@@ -53,8 +53,21 @@ conformance suite worthless, so there is exactly one place that decides.
 | `retry n after d linear max d` | the declared policy, read from the IR rather than re-parsed |
 | an acknowledgement deadline | a handler that never answers has not acknowledged, so a broker redelivers |
 
-It does **not** yet run sagas or fire schedules. A scenario that asserts about one is reported as *not
-fully checked* rather than passed or failed — an assertion that silently passes is worse than a red one.
+And the Process layer:
+
+| It models | Because |
+|---|---|
+| saga instances keyed by business key | two messages with the same key reach the same instance, which is what makes a duplicate start idempotent |
+| steps, their `on` actions and their state | the checker can prove `chargeId` is set before an `undo` reads it, and so can a run |
+| step timeouts and the saga `deadline` | one bounds a wait, the other bounds the process; a saga with neither is unbounded |
+| compensation in reverse, for completed steps only | a step that never succeeded has nothing to reverse, and that asymmetry is the bug worth testing |
+| `schedule` on an anchored civil calendar | a cron expression needs a day of the week, so the clock is a calendar rather than a counter |
+| `onMissed`, via the no-overlap rule | an occurrence due while the last is still retrying is a missed occurrence, so all three policies are observable |
+
+A saga **observes its hosting service** rather than subscribing in its own right — the service
+consumes the start message and the replies, and the saga is that service's process. Giving it its own
+subscription would make it compete with the service for every message on a queue. It also means a
+service that hosts a saga needs no mock: the saga *is* its behaviour.
 
 ## Running real handlers
 
@@ -131,8 +144,11 @@ assertion here an assertion another runtime could also satisfy.
 ```
 
 One event per line: `published`, `delivered`, `filtered`, `deduplicated`, `handled`, `rejected`, `failed`,
-`retrying`, `dead-lettered`, `dropped`, `advanced`. Each `reason` is a code rather than prose, so
-`expect rejected M at S reason unauthorized` can match one; the prose is in `detail`.
+`retrying`, `dead-lettered`, `dropped`, `advanced`, plus the Process layer's `saga-started`,
+`saga-advanced`, `saga-timeout`, `saga-completed`, `saga-rejected`, `saga-abandoned`,
+`saga-compensating`, `saga-irreversible`, `schedule-fired`, `schedule-overrun` and `schedule-missed`.
+Each `reason` is a code rather than prose, so `expect rejected M at S reason unauthorized` can match
+one; the prose is in `detail`.
 
 ## As a library
 
@@ -154,7 +170,7 @@ debugger or a graph view needs to watch one message move at a time.
 
 ```
 npm install
-npm test        # 73 tests
+npm test        # 125 tests
 npm run build
 npx tsx src/cli.ts run ../7K/examples/soldout.scenario.7k
 ```
@@ -173,6 +189,29 @@ The test suite runs the 7K repository's own examples and skips them when it is n
 is the reason the examples are trustworthy at all: `7k check` proves they parse and resolve, and only
 running them proves the behaviour they assert is the behaviour they get. Every defect found while building
 this runtime was an example that checked out and was still wrong.
+
+## What it cannot do yet
+
+**A `send` has no payload.** The Process layer names the message a step or a schedule sends and has
+no way to say what goes in it, so the body is derived: the message's `@role(businessKey)` field takes
+the instance key — which is what makes the reply correlate back — any other field takes a `state` field
+of the same name, and the rest is generated. Every generated field is named in the run's notes, because
+a quietly invented payment amount is worse than a noisy one:
+
+```
+note: `acme.shop.Checkout` sends `acme.shop.ChargeCard` with `amount` generated:
+      no state field of that name and not the message's business key
+```
+
+A schedule has no state at all, so `SettleDay.day` is the day the occurrence *ran* rather than the day
+it was *due*. See the open questions in the language repository's `docs/decisions.md`.
+
+**The saga analyses are not implemented.** `04-process.md` specifies `unhandled-outcome`,
+`unbounded-step`, `uncompensated`, `state-unset`, `saga-liveness`, `saga-key-missing`,
+`saga-key-mismatch`, `timeout-under-deadline` and `saga-cycle`. Those are the checker's work rather
+than the runtime's, and `7k check` does not yet report any of them. The runtime notices some of the
+same things while running — an unbounded step shows up as a stuck instance — but noticing at runtime is
+not the same as refusing at check time.
 
 ## Licence
 

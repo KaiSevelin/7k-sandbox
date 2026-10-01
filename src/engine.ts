@@ -37,13 +37,25 @@ import {
   type Outcome,
   type PipeIr,
   type ReactIr,
+  type Ref,
   type Scenario,
   type ScenarioFile,
   type ServiceIr,
 } from "@sevenk/core";
-import { Clock, EventQueue, Rng, type VirtualTime } from "./clock.js";
+import { Clock, EventQueue, Rng, type ScheduledEvent, type VirtualTime } from "./clock.js";
 import { evaluate, type Claims, type Message } from "./message.js";
-import { prepareBody, prepareEnvelope, specOfDecl, validate, type Problem } from "./schema.js";
+import {
+  fieldSpec,
+  generate,
+  normalizeValue,
+  prepareBody,
+  prepareEnvelope,
+  specOfDecl,
+  validate,
+  type Problem,
+} from "./schema.js";
+import { Sagas, type Instance } from "./saga.js";
+import { Schedules } from "./schedule.js";
 import { Trace, type TraceEvent, type TraceReason } from "./trace.js";
 
 /**
@@ -72,6 +84,8 @@ export interface EngineOptions {
   readonly live?: ReadonlyMap<string, Handler>;
   /** How long an unacknowledged delivery waits before it is redelivered. */
   readonly ackTimeoutMs?: number;
+  /** Run the Process layer: sagas and schedules. On by default. */
+  readonly process?: boolean;
 }
 
 // ---- internal state ---------------------------------------------------------
@@ -101,7 +115,13 @@ interface Delivery {
 type Event =
   | { readonly e: "deliver"; readonly delivery: Delivery }
   | { readonly e: "timeout"; readonly delivery: Delivery }
-  | { readonly e: "emit"; readonly message: Message; readonly pipe: PipeIr };
+  | { readonly e: "emit"; readonly message: Message; readonly pipe: PipeIr }
+  /**
+   * Deferred work for the Process layer: a step timeout, a saga deadline, a schedule
+   * firing. `recurring` marks the ones that generate new work forever, so settling a run
+   * can finish what is in flight without inventing a year of schedule occurrences.
+   */
+  | { readonly e: "timer"; readonly run: () => void; readonly recurring?: boolean };
 
 const ACK_TIMEOUT_DEFAULT = 5_000;
 
@@ -136,6 +156,10 @@ export class Engine {
   private readonly live: ReadonlyMap<string, Handler>;
   private readonly chaos: boolean;
   private readonly ackTimeoutMs: number;
+  /** Packages the scenario can name: its own and its imports. */
+  private readonly visible: ReadonlySet<string>;
+  private readonly sagas?: Sagas;
+  private readonly schedules?: Schedules;
 
   constructor(
     readonly model: LinkedModel,
@@ -149,7 +173,67 @@ export class Engine {
     this.ackTimeoutMs = options.ackTimeoutMs ?? ACK_TIMEOUT_DEFAULT;
     this.live = options.live ?? new Map();
     this.mocks = effectiveMocks(scenarioFile, scenario);
+
+    // The Process layer runs only for what the scenario can see: its own package and the
+    // ones it imports. A saga or a schedule in an unrelated package is not part of the
+    // system under test, and a nightly job three packages away should not be driving the
+    // clock of a scenario about a retry policy.
+    this.visible = new Set<string>([
+      scenarioFile.package,
+      ...(this.model.packages.get(scenarioFile.package)?.imports ?? []).map((i) => i.target),
+    ]);
+
     this.index();
+
+    // The Process layer runs on the same queue and the same clock as everything else, so
+    // a saga's deadline and a message's retry are ordered against each other rather than
+    // living in separate worlds.
+    if (options.process !== false) {
+      this.sagas = new Sagas(this.host(false));
+      this.schedules = new Schedules(this.host(true));
+      this.schedules.start();
+    }
+  }
+
+  /**
+   * What the Process layer is given. Narrow on purpose: a saga may send, wait and record,
+   * and nothing else. It cannot reach into a subscription or a mock.
+   */
+  private host(recurring: boolean) {
+    return {
+      model: this.model,
+      inScope: (pkg: string) => this.visible.has(pkg),
+      now: () => this.clock.now(),
+      record: (event: Omit<TraceEvent, "seq">) => this.trace.record(event),
+      // `recurring` is true for a schedule, whose chain never ends. Settling a run
+      // finishes what is in flight without inventing a year of occurrences.
+      timer: (at: VirtualTime, run: () => void) =>
+        this.queue.schedule(at, { e: "timer", run, recurring }),
+      cancel: (timer: ScheduledEvent<unknown> | undefined) => {
+        if (timer !== undefined) (timer as { cancelled?: boolean }).cancelled = true;
+      },
+      send: (
+        from: ServiceIr,
+        message: MessageIr,
+        body: Readonly<Record<string, JsonValue>>,
+        envelope: Readonly<Record<string, JsonValue>>,
+        claims: Claims,
+      ) => this.sendFrom(from, message, body, envelope, claims),
+      fill: (message: MessageIr, written: Readonly<Record<string, JsonValue>>, at: VirtualTime) =>
+        this.fillBody(message, written, at),
+      note: (text: string) => {
+        this.notes.push(text);
+      },
+    };
+  }
+
+  /** Live saga instances, for a scenario's `expect saga` and for a graph view. */
+  get instances(): readonly Instance[] {
+    return this.sagas?.all ?? [];
+  }
+
+  get sagaRuntime(): Sagas | undefined {
+    return this.sagas;
   }
 
   // ---- wiring ---------------------------------------------------------------
@@ -160,14 +244,6 @@ export class Engine {
     for (const decl of this.model.decls) {
       if (decl.kind === "message") {
         this.messages.set(qualify(decl.id), decl);
-        continue;
-      }
-      if (decl.kind === "schedule") {
-        this.notes.push(`\`${qualify(decl.id)}\` is a schedule, which this runtime does not yet fire`);
-        continue;
-      }
-      if (decl.kind === "saga") {
-        this.notes.push(`\`${qualify(decl.id)}\` is a saga, which this runtime does not yet run`);
         continue;
       }
       // An @external service is a contract, not a participant: nothing is generated
@@ -285,6 +361,89 @@ export class Engine {
 
     this.route(sent, pipe);
     return { message: sent, problems: [] };
+  }
+
+  /**
+   * Sends a message on a service's own `emits` route.
+   *
+   * This is how the Process layer puts anything on a pipe: a step's `send`, a
+   * compensation, a terminal event, a schedule's occurrence. Routing comes from the
+   * hosting service's `emits` table and nowhere else, which is why a service's `emits`
+   * list includes messages its handlers never personally send (`04-process.md` 1.5).
+   */
+  private sendFrom(
+    from: ServiceIr,
+    message: MessageIr,
+    body: Readonly<Record<string, JsonValue>>,
+    envelope: Readonly<Record<string, JsonValue>>,
+    claims: Claims,
+  ): string | undefined {
+    const emit = from.emits.find((e) => {
+      const id = this.model.resolve(e.message);
+      return id !== undefined && qualify(id) === qualify(message.id);
+    });
+    if (emit === undefined) return undefined;
+
+    const pipe = this.model.declFor(emit.pipe);
+    if (pipe === undefined || pipe.kind !== "pipe") return undefined;
+
+    const now = this.clock.now();
+    const sent: Message = {
+      envelope: {
+        id: this.rng.uuid(),
+        type: qualify(message.id),
+        ...(message.version === undefined ? {} : { version: message.version }),
+        time: now,
+        // The saga's envelope travels forward, so a refund is traceable to the order that
+        // caused it (`04-process.md` 1.4).
+        fields: prepareEnvelope(this.model, message, envelope, this.rng, now),
+      },
+      body,
+      from: from.id.name,
+      // A saga acts under the hosting service's identity; the original subject rides as
+      // envelope data rather than as a credential (`04-process.md` 1.8).
+      claims,
+    };
+
+    this.trace.record({
+      ...this.at({
+        message: sent.envelope.type,
+        pipe: qualify(pipe.id),
+        service: sent.from,
+        id: sent.envelope.id,
+        envelope: sent.envelope.fields,
+        body: sent.body,
+      }),
+      kind: "published",
+    });
+
+    this.route(sent, pipe);
+    return sent.envelope.id;
+  }
+
+  /**
+   * Fills a partial body, reporting which fields had to be invented.
+   *
+   * The Process layer has no syntax for a `send` payload, so a saga's command is built
+   * from what the instance holds. Saying which fields were generated is the honest half:
+   * a quietly fabricated payment amount is worse than a noisy one.
+   */
+  private fillBody(
+    message: MessageIr,
+    written: Readonly<Record<string, JsonValue>>,
+    at: VirtualTime,
+  ): { body: Record<string, JsonValue>; generated: readonly string[] } {
+    const spec = specOfDecl(this.model, message, [], 0);
+    const body: Record<string, JsonValue> = { ...written };
+    const generated: string[] = [];
+
+    for (const field of spec.fields ?? []) {
+      if (body[field.name] !== undefined || field.optional) continue;
+      body[field.name] = generate(this.model, fieldSpec(this.model, field), this.rng, at);
+      generated.push(field.name);
+    }
+
+    return { body: normalizeValue(this.model, spec, body) as Record<string, JsonValue>, generated };
   }
 
   /** Puts a message in front of the subscriptions a pipe's kind says should see it. */
@@ -448,6 +607,7 @@ export class Engine {
     delivery.settled = true;
     this.trace.record({ ...this.where(delivery), kind: "handled" });
     this.emitReply(subscription, message, outcome.message, outcome.payload, outcome.afterMs);
+    this.observed(subscription, message);
 
     // `reply X then fail`: the reply is observable *and* the message is redelivered,
     // which is how at-least-once duplication gets exercised against a dedup key.
@@ -455,6 +615,18 @@ export class Engine {
       delivery.settled = false;
       this.failed(delivery, "failed", "mock: reply then fail");
     }
+  }
+
+  /**
+   * A message reached the end of its life at a service.
+   *
+   * A saga observes its hosting service rather than subscribing in its own right, so this
+   * is the one door into the Process layer. A schedule learns from the same place that its
+   * occurrence is over and the next may run.
+   */
+  private observed(subscription: Subscription, message: Message): void {
+    this.sagas?.observe(subscription.service, message);
+    this.schedules?.settled(message.envelope.id);
   }
 
   private async runLive(delivery: Delivery, handler: Handler): Promise<void> {
@@ -466,6 +638,7 @@ export class Engine {
       if (result.reply !== undefined) {
         this.emitReply(subscription, message, result.reply, result.body, 0);
       }
+      this.observed(subscription, message);
     } catch (error) {
       // The cause is outside the model, so the engine records only that it failed
       // (D26): "the gateway timed out" and "the database deadlocked" are the same
@@ -626,6 +799,9 @@ export class Engine {
       reason,
       detail,
     });
+    // An occurrence that dead-letters is over as surely as one that succeeded, so the
+    // schedule is free to run the next.
+    this.schedules?.settled(delivery.message.envelope.id);
   }
 
   /**
@@ -671,6 +847,26 @@ export class Engine {
       // mock them would be noise. One that owes a reply and has no script hangs,
       // because an unscripted service cannot be assumed to behave.
       if (!subscription.owesReply) return { o: "reply", afterMs: 0, thenFail: false };
+
+      // Unless the saga is the handler. A service hosting a saga started by this message
+      // is implemented by that saga, so it answers with its one declared reply — which is
+      // what "the process began" means. Several alternatives and the saga cannot choose.
+      const saga = this.sagas?.startsASaga(subscription.service, message.envelope.type);
+      if (saga !== undefined) {
+        const alternatives = (subscription.react.replies ?? []).filter((r) => r !== "none");
+        if (alternatives.length === 1) {
+          const only = this.model.declFor(alternatives[0] as Ref);
+          if (only?.kind === "message") {
+            return { o: "reply", message: qualify(only.id), afterMs: 0, thenFail: false };
+          }
+        }
+        this.notes.push(
+          `\`${subscription.service.id.name}\` starts \`${qualify(saga.id)}\` on ` +
+            `\`${message.envelope.type}\` but declares ${alternatives.length} replies, so the saga ` +
+            "cannot choose which to send; mock the service to say",
+        );
+        return { o: "hang" };
+      }
 
       this.notes.push(
         `\`${subscription.service.id.name}\` owes a reply to \`${message.envelope.type}\` but is ` +
@@ -758,6 +954,10 @@ export class Engine {
         this.failed(event.delivery, "timeout", `no acknowledgement within ${this.ackTimeoutMs}ms`);
         return;
 
+      case "timer":
+        event.run();
+        return;
+
       case "emit":
         this.trace.record({
           ...this.at({
@@ -801,6 +1001,26 @@ export class Engine {
   async advanceTo(at: VirtualTime): Promise<void> {
     if (at > this.clock.now()) await this.advance(at - this.clock.now(), false);
     else await this.drain();
+  }
+
+  /**
+   * Finishes the work already in flight, ignoring recurring timers.
+   *
+   * This is what a scenario wants after its last step: a dead letter one backoff away
+   * should still appear, but the clock should not run on inventing schedule occurrences
+   * the scenario never asked to advance through. A schedule fires because a scenario
+   * advanced the clock past it, not because the run ended.
+   */
+  async settle(limitMs = 30 * 86_400_000): Promise<void> {
+    const deadline = this.clock.now() + limitMs;
+    for (;;) {
+      await this.drain();
+      const next = this.queue
+        .pending()
+        .find((e) => !(e.payload.e === "timer" && e.payload.recurring === true));
+      if (next === undefined || next.at > deadline) return;
+      this.clock.jumpTo(next.at);
+    }
   }
 
   /** Runs until nothing is pending, however far away that is on the clock. */
