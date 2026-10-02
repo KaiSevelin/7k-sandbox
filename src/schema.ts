@@ -15,6 +15,7 @@
 
 import {
   isDirective,
+  showPredicate,
   type ConstraintIr,
   type Decl,
   type FieldIr,
@@ -22,9 +23,12 @@ import {
   type KernelName,
   type LinkedModel,
   type MessageIr,
+  type Operand,
+  type Predicate,
   type TypeIr,
 } from "@sevenk/core";
 import type { Rng, VirtualTime } from "./clock.js";
+import { evaluate, readPath, type Message } from "./message.js";
 
 /** A type flattened through its `value` aliases, carrying every constraint it picked up. */
 export interface Spec {
@@ -37,6 +41,8 @@ export interface Spec {
   readonly members?: readonly string[];
   readonly item?: Spec;
   readonly value?: Spec;
+  /** Contract rules over this record's own data, evaluated once its fields are checked. */
+  readonly invariants?: readonly Predicate[];
   /** For a diagnostic: the name as declared. */
   readonly named?: string;
 }
@@ -104,9 +110,15 @@ export function specOfDecl(
       return { shape: "enum", members: decl.members.map((m) => m.name), constraints: extra, named: decl.id.name };
     case "record":
     case "envelope":
-      return { shape: "record", fields: flatFields(model, decl, depth), constraints: extra, named: decl.id.name };
     case "message":
-      return { shape: "record", fields: flatFields(model, decl, depth), constraints: extra, named: decl.id.name };
+      return {
+        shape: "record",
+        fields: flatFields(model, decl, depth),
+        // An envelope declares none; a record and a message may (`02-contract.md` section 3).
+        ...(decl.kind === "envelope" ? {} : { invariants: decl.invariants }),
+        constraints: extra,
+        named: decl.id.name,
+      };
     default:
       return UNKNOWN;
   }
@@ -279,12 +291,25 @@ const RFC3339 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DURATION = /^(P|\d+(ms|s|m|h|d))/;
 
+/**
+ * What an invariant may read besides the value it is declared on.
+ *
+ * A bare path reads that value; `message.` reads the whole body it sits in, so an invariant on
+ * a nested record can relate an element to the message around it; `envelope.` reads the envelope
+ * (`10-grammar.md`'s clause table permits both).
+ */
+export interface Context {
+  readonly root?: JsonValue;
+  readonly envelope?: Readonly<Record<string, JsonValue>>;
+}
+
 export function validate(
   model: LinkedModel,
   spec: Spec,
   value: JsonValue,
   path = "",
   out: Problem[] = [],
+  context: Context = {},
 ): Problem[] {
   const at = path === "" ? "(root)" : path;
 
@@ -325,7 +350,7 @@ export function validate(
         if (seen.size !== value.length) out.push({ path: at, message: "declared unique, but has duplicates" });
       }
       if (spec.item !== undefined) {
-        value.forEach((v, i) => validate(model, spec.item!, v, `${path}[${i}]`, out));
+        value.forEach((v, i) => validate(model, spec.item!, v, `${path}[${i}]`, out, context));
       }
       return out;
     }
@@ -336,6 +361,7 @@ export function validate(
         return out;
       }
       const object = value as Record<string, JsonValue>;
+      const before = out.length;
       const declared = new Set<string>();
       for (const field of spec.fields ?? []) {
         declared.add(field.name);
@@ -345,11 +371,15 @@ export function validate(
           if (!field.optional) out.push({ path: sub, message: "required field is absent" });
           continue;
         }
-        validate(model, fieldSpec(model, field), present, sub, out);
+        validate(model, fieldSpec(model, field), present, sub, out, context);
       }
       for (const key of Object.keys(object)) {
         if (!declared.has(key)) out.push({ path: `${path === "" ? "" : `${path}.`}${key}`, message: "not a declared field" });
       }
+
+      // Invariants last, and only when the fields themselves hold up: a rule over a value that
+      // is already the wrong shape would report a second, derived failure for one cause.
+      if (out.length === before) checkInvariants(spec, object, at, context ?? {}, out);
       return out;
     }
 
@@ -360,7 +390,7 @@ export function validate(
       }
       if (spec.value !== undefined) {
         for (const [k, v] of Object.entries(value as Record<string, JsonValue>)) {
-          validate(model, spec.value, v, `${path}.${k}`, out);
+          validate(model, spec.value, v, `${path}.${k}`, out, context);
         }
       }
       return out;
@@ -368,6 +398,111 @@ export function validate(
 
     case "scalar":
       return validateScalar(spec, value, at, out);
+  }
+}
+
+/**
+ * Evaluates a record's invariants against it.
+ *
+ * A predicate that reads a path with no value is reported as that, not as a rule that failed:
+ * an absent operand makes a comparison false (by design), so a typo in a path would otherwise
+ * look exactly like a contract genuinely broken, on every message forever.
+ */
+function checkInvariants(
+  spec: Spec,
+  object: Readonly<Record<string, JsonValue>>,
+  at: string,
+  context: Context,
+  out: Problem[],
+): void {
+  for (const invariant of spec.invariants ?? []) {
+    const missing = unreadable(invariant, object, context);
+    if (missing !== undefined) {
+      out.push({
+        path: at,
+        message: `the invariant \`${showPredicate(invariant)}\` reads \`${missing}\`, which has no value here`,
+      });
+      continue;
+    }
+
+    if (holds(invariant, object, context)) continue;
+    out.push({ path: at, message: `the invariant \`${showPredicate(invariant)}\` does not hold` });
+  }
+}
+
+/** A message-shaped view of a record, so one predicate evaluator serves every clause. */
+const asMessage = (object: Readonly<Record<string, JsonValue>>, context: Context): Message => ({
+  envelope: { id: "", type: "", time: 0, fields: context.envelope ?? {} },
+  body: (context.root ?? object) as Readonly<Record<string, JsonValue>>,
+  from: "",
+  claims: {},
+});
+
+/**
+ * Whether an invariant holds.
+ *
+ * A bare path reads the record it is declared on, which is not what `message.` reads when the
+ * record is nested — so the two are evaluated against different roots.
+ */
+function holds(
+  invariant: Predicate,
+  object: Readonly<Record<string, JsonValue>>,
+  context: Context,
+): boolean {
+  return evaluate(invariant, {
+    ...asMessage(object, context),
+    // `field` operands read the body, so the body *is* this record for a bare path.
+    body: object,
+  });
+}
+
+/** The first path an invariant reads that has no value, if any. */
+function unreadable(
+  invariant: Predicate,
+  object: Readonly<Record<string, JsonValue>>,
+  context: Context,
+): string | undefined {
+  for (const operand of operandsOf(invariant)) {
+    if (operand.k === "literal" || operand.k === "list") continue;
+
+    const root: JsonValue =
+      operand.k === "envelope"
+        ? ((context.envelope ?? {}) as JsonValue)
+        : operand.k === "message"
+          ? ((context.root ?? object) as JsonValue)
+          : (object as JsonValue);
+
+    if (operand.k === "claim") continue;
+
+    const read = readPath(root, operand.path);
+    // A projected path yields one entry per element, each of which may itself be absent — so
+    // `lines[].unit.currncy` over two lines reads `[undefined, undefined]` rather than nothing
+    // at all, and a length check would call that readable.
+    const empty = Array.isArray(read)
+      ? read.length === 0 || read.every((v) => v === undefined)
+      : read === undefined;
+    if (!empty) continue;
+
+    const shown = `${operand.k === "field" ? "" : `${operand.k}.`}${operand.path.join(".")}`;
+    return shown;
+  }
+  return undefined;
+}
+
+/** Every operand a predicate reads, flattened. */
+function operandsOf(predicate: Predicate, out: Operand[] = []): Operand[] {
+  switch (predicate.p) {
+    case "and":
+    case "or":
+      for (const p of predicate.operands) operandsOf(p, out);
+      return out;
+    case "not":
+      return operandsOf(predicate.operand, out);
+    case "cmp":
+      out.push(predicate.left, predicate.right);
+      return out;
+    case "unknown":
+      return out;
   }
 }
 
@@ -770,6 +905,7 @@ export function prepareBody(
   rng: Rng,
   now: VirtualTime,
   fill?: Readonly<Record<string, JsonValue>>,
+  envelope?: Readonly<Record<string, JsonValue>>,
 ): BodyResult {
   const spec = specOfDecl(model, message, [], 0);
   const resolved = resolve(model, spec, written as JsonValue, rng, now) as Record<string, JsonValue>;
@@ -787,7 +923,10 @@ export function prepareBody(
   }
 
   const normalized = normalizeValue(model, spec, resolved) as Record<string, JsonValue>;
-  return { body: normalized, problems: validate(model, spec, normalized) };
+  return {
+    body: normalized,
+    problems: validate(model, spec, normalized, "", [], { root: normalized, ...(envelope === undefined ? {} : { envelope }) }),
+  };
 }
 
 /**

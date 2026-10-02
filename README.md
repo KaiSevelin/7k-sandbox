@@ -49,6 +49,7 @@ conformance suite worthless, so there is exactly one place that decides.
 | `where` filters before delivery | a filtered message is never retried and never dead-lettered |
 | `requires` before the handler | a failed claim check cannot succeed on a second attempt |
 | validation and `normalize` on receipt | normalization is what makes equality well-defined across a pipe |
+| `invariant`, per record and per element | a rule relating two fields is a contract rule, and nothing else can check it |
 | envelope propagation and `@derive(inbound.id)` | a correlation chain has to survive a hop |
 | `retry n after d linear max d` | the declared policy, read from the IR rather than re-parsed |
 | an acknowledgement deadline | a handler that never answers has not acknowledged, so a broker redelivers |
@@ -172,7 +173,7 @@ debugger or a graph view needs to watch one message move at a time.
 
 ```
 npm install
-npm test        # 147 tests
+npm test        # 155 tests
 npm run build
 npx tsx src/cli.ts run ../7K/examples/soldout.scenario.7k
 ```
@@ -194,9 +195,13 @@ this runtime was an example that checked out and was still wrong.
 
 ## What it cannot do yet
 
-**Invariants are not evaluated.** A `message` may declare one — `invariant total.currency ==
-lines[].unit.currency` — and Core drops it on the way to the IR, so neither the checker nor this runtime
-enforces it. A generated fixture will happily produce a total in one currency and lines in another.
+**Projections.** `02-contract.md` section 6 specifies a lossy export into JSON Schema, Avro, protobuf or
+OpenAPI, each with a documented loss profile. Nothing emits one.
+
+**Two checks that are not checks.** `external-bound` asks whether an implementation was told to generate
+an `@external` service, and the language has no binding construct for it to be told in; `schedule-overrun`
+is a runtime observation, which this runtime reports as a trace event rather than the checker reporting it
+statically.
 
 ## Licence
 

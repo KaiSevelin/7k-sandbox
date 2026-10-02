@@ -165,11 +165,30 @@ export function evaluate(predicate: Predicate, message: Message): boolean {
       const left = valueOf(predicate.left, message);
       const right = valueOf(predicate.right, message);
 
-      const projected = predicate.left.k !== "list" && Array.isArray(left);
-      if (projected && predicate.op !== "contains") {
+      // A projection distributes, and it may be on either side: an invariant is as likely to be
+      // written `total.currency == lines[].unit.currency` as the other way round. Only the first
+      // form worked until this, so every invariant with the projection on the right was false.
+      const leftProjected = predicate.left.k !== "list" && Array.isArray(left);
+      const rightProjected =
+        predicate.right.k !== "list" && Array.isArray(right) && predicate.op !== "contains";
+
+      if (leftProjected && rightProjected) {
+        const a = left as JsonValue[];
+        const b = right as JsonValue[];
+        // Element-wise, which is the only reading two projections have: `a[].x == a[].y`.
+        return a.length > 0 && a.length === b.length && a.every((v, i) => compare(predicate.op, v, b[i]));
+      }
+
+      if (leftProjected && predicate.op !== "contains") {
         const items = left as JsonValue[];
         return items.length > 0 && items.every((v) => compare(predicate.op, v, right as JsonValue));
       }
+
+      if (rightProjected) {
+        const items = right as JsonValue[];
+        return items.length > 0 && items.every((v) => compare(predicate.op, left as JsonValue, v));
+      }
+
       return compare(predicate.op, left as JsonValue, right as JsonValue);
     }
   }
