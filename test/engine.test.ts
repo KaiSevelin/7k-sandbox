@@ -130,6 +130,9 @@ ${send}
   });
 
   it("filters a version the subscription pins away from", async () => {
+    // `version-mismatch`: the checker now refuses a consumer that rejects every version its
+    // producers send, which is the better place to catch it. This is the runtime's behaviour
+    // when handed one anyway.
     const model = MODEL_WITH_SENDER.replace(
       "message Work v1.0 @command {",
       "message Work v1.1 @command {",
@@ -142,6 +145,9 @@ ${send}
 ${send}
   advance 1s
   expect no Done on events`),
+      undefined,
+      {},
+      ["version-mismatch"],
     );
 
     expect(result.status).toBe("pass");
