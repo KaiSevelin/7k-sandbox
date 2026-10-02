@@ -4,26 +4,45 @@
   "description": "A deterministic in-memory runtime for 7K models, with a virtual clock",
   "license": "Apache-2.0",
   "type": "module",
-  "repository": { "type": "git", "url": "https://github.com/KaiSevelin/7k-sandbox.git" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KaiSevelin/7k-sandbox.git"
+  },
   "homepage": "https://github.com/KaiSevelin/7k-sandbox#readme",
-  "bugs": { "url": "https://github.com/KaiSevelin/7k-sandbox/issues" },
-  "keywords": ["7k", "sandbox", "simulation", "message-driven", "virtual-clock"],
-  "engines": { "node": ">=20" },
+  "bugs": {
+    "url": "https://github.com/KaiSevelin/7k-sandbox/issues"
+  },
+  "keywords": [
+    "7k",
+    "sandbox",
+    "simulation",
+    "message-driven",
+    "virtual-clock"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": "./src/index.ts" },
-  "bin": { "7k-sandbox": "./dist/cli.js" },
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "bin": {
+    "7k-sandbox": "./dist/cli.js"
+  },
   "scripts": {
     "build": "tsc --build",
     "test": "vitest run",
     "typecheck": "tsc --build --force",
     "run": "tsx src/cli.ts"
   },
-  "dependencies": { "@sevenk/core": "file:../7K/packages/core" },
+  "dependencies": {
+    "@sevenk/core": "file:../7K/packages/core"
+  },
   "devDependencies": {
     "@types/node": "^22.10.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
-    "vitest": "^2.1.0"
+    "vitest": "^4.1.11"
   }
 }
