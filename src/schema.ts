@@ -14,6 +14,7 @@
  */
 
 import {
+  flatFields as coreFlatFields,
   isDirective,
   showPredicate,
   type ConstraintIr,
@@ -124,20 +125,14 @@ export function specOfDecl(
   }
 }
 
-/** A record's own fields plus everything it `include`s, in declaration order. */
-export function flatFields(model: LinkedModel, decl: Decl, depth = 0): FieldIr[] {
-  if (depth > 16) return [];
-  if (decl.kind !== "record" && decl.kind !== "envelope" && decl.kind !== "message") return [];
-
-  const out: FieldIr[] = [];
-  for (const inc of decl.includes) {
-    const target = model.declFor(inc);
-    if (target !== undefined) out.push(...flatFields(model, target, depth + 1));
-  }
-  // A field declared locally shadows an included one of the same name.
-  const own = new Set(decl.fields.map((f) => f.name));
-  return [...out.filter((f) => !own.has(f.name)), ...decl.fields];
-}
+/**
+ * A record's own fields plus everything it `include`s, in declaration order.
+ *
+ * Core's, not a copy: "what fields does this have?" is a question about the language, and a
+ * projection needs the same answer this does. Two implementations would be one too many.
+ */
+export const flatFields = (model: LinkedModel, decl: Decl, depth = 0): FieldIr[] =>
+  coreFlatFields((ref) => model.declFor(ref), decl, depth);
 
 /** The spec for one field: its type, carrying the field's own constraints. */
 export const fieldSpec = (model: LinkedModel, field: FieldIr): Spec =>
