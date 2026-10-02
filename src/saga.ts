@@ -50,7 +50,7 @@ export interface SagaHost {
   /** Whether a package is one the scenario can name. */
   inScope(pkg: string): boolean;
   now(): VirtualTime;
-  record(event: Omit<TraceEvent, "seq">): TraceEvent;
+  record(event: Omit<TraceEvent, "seq" | "run">): TraceEvent;
   /** Deferred work on the virtual clock, cancellable because a step may finish early. */
   timer(at: VirtualTime, run: () => void): ScheduledEvent<unknown>;
   cancel(timer: ScheduledEvent<unknown> | undefined): void;

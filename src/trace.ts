@@ -1,110 +1,37 @@
 /**
- * The trace: NDJSON, one envelope event per line.
+ * Collecting a trace.
  *
- * One of 7K's published interchange artifacts (`docs/spec/30-scenarios.md` section
- * 7), which is why its shape is not this runtime's private business. Specifying it
- * is what lets a tool read any runtime's output: Spider never talks to the sandbox
- * directly, a trace file is a shareable bug report, and a converter from
- * OpenTelemetry spans can point the same views at production.
+ * The **format** is not this file's business any more. It is one of 7K's published interchange
+ * artifacts (`docs/spec/30-scenarios.md` section 7), defined in `@sevenk/core` so that a writer and a
+ * reader import the same thing — and it lives there rather than here because the sandbox is one
+ * producer among several, and a format owned by one of its producers drifts toward that producer
+ * (D93).
+ *
+ * It drifted exactly that way while it lived here: `service` was written bare while everything else
+ * was qualified, `correlation` was declared and never emitted, `seq` restarted per run so a file of
+ * two runs had two events numbered 0, and the key order was whichever branch happened to build the
+ * object. Spider, the first consumer, had to read this file to learn any of it.
+ *
+ * What is left here is what a runtime genuinely owns: gathering events in order, and rendering them
+ * for a terminal.
  */
 
-import type { JsonValue } from "@sevenk/core";
-import type { VirtualTime } from "./clock.js";
-import type { Claims } from "./message.js";
+import { writeTrace, type TraceEvent, type TraceKind } from "@sevenk/core";
 
-export type TraceKind =
-  /** A message put on a pipe. */
-  | "published"
-  /** Handed to a subscription's handler. */
-  | "delivered"
-  /** Not delivered: a `where` filter declined it. Never retried, never dead-lettered. */
-  | "filtered"
-  /** Not delivered: the deduplication key was already seen. */
-  | "deduplicated"
-  /** The handler ran and returned. */
-  | "handled"
-  /** Refused before the handler: a failed claim check or an invalid payload. Never retried. */
-  | "rejected"
-  /** The handler failed. Retried if the pipe's guarantee allows it. */
-  | "failed"
-  | "retrying"
-  | "dead-lettered"
-  /** Lost: an `at-most-once` pipe, so there is nowhere for it to go. */
-  | "dropped"
-  /** An older message was translated to the version its consumer understands. */
-  | "upcast"
-  /** The clock moved. */
-  | "advanced"
-  // ---- the Process layer ----------------------------------------------------
-  /** A saga instance was created by its start message. */
-  | "saga-started"
-  /** A start message arrived for a key that already had an instance. */
-  | "saga-redundant-start"
-  /** An awaited message reached the instance and its step's action ran. */
-  | "saga-advanced"
-  /** A step waited longer than its declared timeout. */
-  | "saga-timeout"
-  | "saga-completed"
-  | "saga-rejected"
-  | "saga-abandoned"
-  /** A completed step's inverse was sent while unwinding. */
-  | "saga-compensating"
-  /** A completed step declared `undo none`, so unwinding skipped it. */
-  | "saga-irreversible"
-  /** A schedule fired an occurrence. */
-  | "schedule-fired"
-  /** An occurrence came due while the previous one was still in flight. */
-  | "schedule-overrun"
-  /** Occurrences a gap swallowed, resolved by `onMissed`. */
-  | "schedule-missed";
-
-/** The closed set a `reason` may take, so `expect rejected ... reason x` can match. */
-export type TraceReason =
-  | "unauthorized"
-  | "invalid"
-  | "timeout"
-  | "failed"
-  | "duplicate"
-  | "filtered"
-  | "version"
-  | "lossy"
-  | "exhausted"
-  | "discarded";
-
-export interface TraceEvent {
-  readonly at: VirtualTime;
-  readonly iso: string;
-  readonly seq: number;
-  readonly kind: TraceKind;
-  readonly message?: string;
-  readonly pipe?: string;
-  readonly service?: string;
-  readonly subscription?: string;
-  readonly id?: string;
-  readonly correlation?: string;
-  readonly attempt?: number;
-  /**
-   * A stable code, not prose: a scenario writes `reason unauthorized`, so this has
-   * to be matchable. The prose goes in `detail`.
-   */
-  readonly reason?: TraceReason;
-  readonly detail?: string;
-  readonly envelope?: Readonly<Record<string, JsonValue>>;
-  /** The saga a Process-layer event belongs to, qualified. */
-  readonly saga?: string;
-  /** The instance key, which is not the correlation id (`04-process.md` 1.1). */
-  readonly sagaKey?: string;
-  readonly schedule?: string;
-  readonly body?: Readonly<Record<string, JsonValue>>;
-  readonly claims?: Claims;
-}
+export type { TraceEvent, TraceKind, TraceReason } from "@sevenk/core";
 
 export class Trace {
   private readonly events: TraceEvent[] = [];
   private seq = 0;
 
-  record(event: Omit<TraceEvent, "seq">): TraceEvent {
-    const full: TraceEvent = { ...event, seq: this.seq++ };
+  /**
+   * @param run identifies this trace among others in one file. It carries the scenario and the seed,
+   * because that pair is the whole of what a failure is: a model plus a number.
+   */
+  constructor(readonly run: string) {}
+
+  record(event: Omit<TraceEvent, "seq" | "run">): TraceEvent {
+    const full: TraceEvent = { ...event, run: this.run, seq: this.seq++ };
     this.events.push(full);
     return full;
   }
@@ -117,9 +44,9 @@ export class Trace {
     return this.events.filter((e) => e.kind === kind);
   }
 
-  /** NDJSON, one event per line. */
+  /** NDJSON, per section 7: Core writes it, so the field order and the bytes are the format's. */
   toNdjson(): string {
-    return this.events.map((e) => JSON.stringify(e)).join("\n") + (this.events.length > 0 ? "\n" : "");
+    return writeTrace(this.events);
   }
 
   /** A compact rendering for a terminal, which is what a first run wants. */

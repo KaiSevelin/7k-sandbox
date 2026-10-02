@@ -36,7 +36,7 @@ export interface ScheduleHost {
   /** Whether a package is one the scenario can name. */
   inScope(pkg: string): boolean;
   now(): VirtualTime;
-  record(event: Omit<TraceEvent, "seq">): TraceEvent;
+  record(event: Omit<TraceEvent, "seq" | "run">): TraceEvent;
   timer(at: VirtualTime, run: () => void): ScheduledEvent<unknown>;
   send(
     from: ServiceIr,

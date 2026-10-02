@@ -143,13 +143,27 @@ function backoffFor(react: ReactIr, attempt: number): number {
   return policy.maxMs === undefined ? raw : Math.min(raw, policy.maxMs);
 }
 
+/**
+ * The `service` field for a publisher, which a scenario is not.
+ *
+ * `Message.from` is a qualified service name, or the marker `"scenario"` when the scenario published
+ * the message itself. There is no service in that case, so the field is omitted rather than filled
+ * with something that is not a declaration — section 7.6 requires a qualified service name, and
+ * inventing one to satisfy the rule would be worse than saying nothing.
+ */
+const senderOf = (from: string): { service?: string } =>
+  from === SCENARIO_SENDER ? {} : { service: from };
+
+/** Who a scenario's own `publish` is from. Not a service, and deliberately not name-shaped. */
+export const SCENARIO_SENDER = "scenario";
+
 /** `retry 0` means deliver once, so the attempt budget is always one more than that. */
 const attemptsFor = (react: ReactIr): number => (react.retry ?? RETRY_DEFAULT).retries + 1;
 
 export class Engine {
   readonly clock: Clock;
   readonly rng: Rng;
-  readonly trace = new Trace();
+  readonly trace: Trace;
   /** Things only running the model reveals, and things the sandbox cannot yet run. */
   readonly notes: string[] = [];
 
@@ -173,6 +187,9 @@ export class Engine {
   ) {
     this.clock = new Clock(options.start === undefined ? {} : { start: options.start });
     this.rng = new Rng(options.seed ?? scenario.seed ?? 0);
+    // `<scenario>#<seed>` identifies the run (`30-scenarios.md` 7.2), and is also exactly what is
+    // needed to reproduce it.
+    this.trace = new Trace(`${scenario.name}#${this.rng.seed}`);
     this.chaos = options.chaos ?? false;
     this.ackTimeoutMs = options.ackTimeoutMs ?? ACK_TIMEOUT_DEFAULT;
     this.live = options.live ?? new Map();
@@ -208,7 +225,7 @@ export class Engine {
       model: this.model,
       inScope: (pkg: string) => this.visible.has(pkg),
       now: () => this.clock.now(),
-      record: (event: Omit<TraceEvent, "seq">) => this.trace.record(event),
+      record: (event: Omit<TraceEvent, "seq" | "run">) => this.trace.record(event),
       // `recurring` is true for a schedule, whose chain never ends. Settling a run
       // finishes what is in flight without inventing a year of occurrences.
       timer: (at: VirtualTime, run: () => void) =>
@@ -294,15 +311,15 @@ export class Engine {
     );
   }
 
-  private at(extra: Partial<TraceEvent> = {}): Omit<TraceEvent, "seq" | "kind"> {
+  private at(extra: Partial<TraceEvent> = {}): Omit<TraceEvent, "seq" | "kind" | "run"> {
     return { at: this.clock.now(), iso: this.clock.iso(), ...extra };
   }
 
-  private where(d: Delivery): Omit<TraceEvent, "seq" | "kind"> {
+  private where(d: Delivery): Omit<TraceEvent, "seq" | "kind" | "run"> {
     return this.at({
       message: d.message.envelope.type,
       pipe: qualify(d.pipe.id),
-      service: d.subscription.service.id.name,
+      service: qualify(d.subscription.service.id),
       subscription: d.subscription.name,
       id: d.message.envelope.id,
     });
@@ -351,7 +368,7 @@ export class Engine {
         fields: envelope,
       },
       body,
-      from: options.from ?? "scenario",
+      from: options.from ?? SCENARIO_SENDER,
       claims: options.claims ?? {},
     };
 
@@ -364,7 +381,7 @@ export class Engine {
       ...this.at({
         message: sent.envelope.type,
         pipe: qualify(pipe.id),
-        service: sent.from,
+        ...senderOf(sent.from),
         id: sent.envelope.id,
         envelope: sent.envelope.fields,
         body: sent.body,
@@ -413,7 +430,7 @@ export class Engine {
         fields: prepareEnvelope(this.model, message, envelope, this.rng, now),
       },
       body,
-      from: from.id.name,
+      from: qualify(from.id),
       // A saga acts under the hosting service's identity; the original subject rides as
       // envelope data rather than as a credential (`04-process.md` 1.8).
       claims,
@@ -423,7 +440,7 @@ export class Engine {
       ...this.at({
         message: sent.envelope.type,
         pipe: qualify(pipe.id),
-        service: sent.from,
+        ...senderOf(sent.from),
         id: sent.envelope.id,
         envelope: sent.envelope.fields,
         body: sent.body,
@@ -494,7 +511,7 @@ export class Engine {
         ...this.at({
           message: message.envelope.type,
           pipe: qualify(pipe.id),
-          service: s.service.id.name,
+          service: qualify(s.service.id),
           subscription: s.name,
           id: message.envelope.id,
           reason,
@@ -786,7 +803,7 @@ export class Engine {
           fields: envelope,
         },
         body,
-        from: subscription.service.id.name,
+        from: qualify(subscription.service.id),
         // Identity travels with the conversation, so a downstream `requires` sees the
         // same subject the originator presented.
         claims: inbound.claims,
@@ -1030,7 +1047,7 @@ export class Engine {
           ...this.at({
             message: event.message.envelope.type,
             pipe: qualify(event.pipe.id),
-            service: event.message.from,
+            ...senderOf(event.message.from),
             id: event.message.envelope.id,
             envelope: event.message.envelope.fields,
             body: event.message.body,

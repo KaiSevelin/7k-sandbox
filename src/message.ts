@@ -25,7 +25,10 @@ export interface Envelope {
 export interface Message {
   readonly envelope: Envelope;
   readonly body: Readonly<Record<string, JsonValue>>;
-  /** Who sent it. Envelope propagation and `requires` both depend on it. */
+  /**
+   * Who sent it: a **qualified** service name, or `"scenario"` when the scenario published it
+   * itself. Read by the trace, which writes it as `service` (`30-scenarios.md` 7.6).
+   */
   readonly from: string;
   readonly claims: Claims;
 }

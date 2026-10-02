@@ -128,9 +128,16 @@ at all, because failures about unresolved names say nothing about the system.
 
 ## The trace
 
-The trace is a [published interchange artifact](https://github.com/KaiSevelin/7k/blob/main/docs/spec/30-scenarios.md),
+The trace is a [published interchange artifact](https://github.com/KaiSevelin/7k/blob/main/docs/spec/30-scenarios.md#7-traces),
 not this runtime's private business. Every expectation is evaluated against it, which is what makes an
 assertion here an assertion another runtime could also satisfy.
+
+The **format** is not this runtime's business either. It is specified in section 7 of that document and defined
+in `@sevenk/core`, so a writer and a reader import one contract rather than agreeing twice, and
+`test/trace-format.test.ts` validates every trace this runtime produces against it. That matters because the
+format lived here first, and drifted while it did: `service` was written bare while every other name was
+qualified, `seq` restarted per run so a file of two runs had two events numbered 0, and the field order was
+whichever branch happened to build the object. Spider found all of it on its first day as a consumer.
 
 ```
 7k-sandbox trace checkout.scenario.7k --ndjson > trace.ndjson
@@ -173,7 +180,7 @@ debugger or a graph view needs to watch one message move at a time.
 
 ```
 npm install
-npm test        # 155 tests
+npm test        # 162 tests
 npm run build
 npx tsx src/cli.ts run ../7K/examples/soldout.scenario.7k
 ```

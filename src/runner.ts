@@ -257,7 +257,7 @@ export async function runScenario(
       target.pipe,
       (publish.payload ?? {}) as Record<string, JsonValue>,
       {
-        ...(sender === undefined ? {} : { from: sender.id.name }),
+        ...(sender === undefined ? {} : { from: qualify(sender.id) }),
         ...(publish.claims === undefined ? {} : { claims: publish.claims as Claims }),
         ...(publish.envelope === undefined
           ? {}
@@ -396,7 +396,7 @@ function judge(engine: Engine, model: LinkedModel, pkg: string, expect: Expect):
       }
       const type = qualify(message.id);
       const found = events.filter(
-        (e) => e.kind === "handled" && e.service === service.id.name && e.message === type,
+        (e) => e.kind === "handled" && e.service === qualify(service.id) && e.message === type,
       ).length;
 
       if (expect.count !== undefined) {
@@ -419,7 +419,7 @@ function judge(engine: Engine, model: LinkedModel, pkg: string, expect: Expect):
         if (service === undefined) {
           return fail(`\`${expect.service}\` is not a service visible from ${pkg}`);
         }
-        found = found.filter((e) => e.service === service.id.name);
+        found = found.filter((e) => e.service === qualify(service.id));
       }
       if (expect.reason !== undefined) {
         const wanted = expect.reason.toLowerCase();
