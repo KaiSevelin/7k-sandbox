@@ -31,6 +31,8 @@ export type TraceKind =
   | "dead-lettered"
   /** Lost: an `at-most-once` pipe, so there is nowhere for it to go. */
   | "dropped"
+  /** An older message was translated to the version its consumer understands. */
+  | "upcast"
   /** The clock moved. */
   | "advanced"
   // ---- the Process layer ----------------------------------------------------

@@ -24,7 +24,7 @@ describe.skipIf(!present)("the 7K examples", () => {
 
     expect(report.blocked).toBe(false);
     const results = report.files.flatMap((f) => f.scenarios);
-    expect(results).toHaveLength(7);
+    expect(results).toHaveLength(8);
 
     const failures = results
       .filter((r) => r.status !== "pass")
@@ -34,6 +34,18 @@ describe.skipIf(!present)("the 7K examples", () => {
         .join("; ")}`);
 
     expect(failures).toEqual([]);
+  });
+
+  it("applies the upcast sales.7k declares, which nothing exercised before", async () => {
+    const report = await run([resolve(EXAMPLES, "soldout.scenario.7k")]);
+    const upcasting = report.files
+      .flatMap((f) => f.scenarios)
+      .find((s) => s.name === "OldOrderPlacedUpcasts")!;
+
+    expect(upcasting.status).toBe("pass");
+    expect(upcasting.trace.of("upcast").map((e) => e.detail)).toEqual(["v1.0 to v1.1"]);
+    // `note = absent` leaves the key out, and the v1.0 shape never had it.
+    expect(upcasting.trace.of("upcast")[0]?.body).not.toHaveProperty("note");
   });
 
   it("holds an hour of simulated load without waiting for it", async () => {

@@ -262,6 +262,7 @@ export async function runScenario(
         ...(publish.envelope === undefined
           ? {}
           : { envelope: publish.envelope as Record<string, JsonValue> }),
+        ...(publish.version === undefined ? {} : { version: publish.version }),
         checked: !publish.unchecked,
       },
     );

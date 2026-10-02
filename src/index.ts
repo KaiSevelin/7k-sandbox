@@ -67,6 +67,14 @@ export { Sagas, type Instance, type SagaHost } from "./saga.js";
 export { Schedules, type ScheduleHost } from "./schedule.js";
 
 export {
+  apply as applyUpcasts,
+  chain as upcastChain,
+  fieldAt,
+  shapeAt,
+  type Applied,
+} from "./upcast.js";
+
+export {
   Engine,
   type EngineOptions,
   type Handler,

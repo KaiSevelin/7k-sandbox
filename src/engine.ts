@@ -60,6 +60,7 @@ import {
 import { Sagas, type Instance } from "./saga.js";
 import { Schedules } from "./schedule.js";
 import { Trace, type TraceEvent, type TraceReason } from "./trace.js";
+import { apply as applyUpcasts, shapeAt } from "./upcast.js";
 
 /**
  * A live handler. It receives what a generated wrapper would hand it — a validated,
@@ -325,17 +326,27 @@ export class Engine {
       readonly claims?: Claims;
       readonly envelope?: Readonly<Record<string, JsonValue>>;
       readonly checked?: boolean;
+      /** Send an older version than the message declares, to exercise an `upcast`. */
+      readonly version?: string;
     } = {},
   ): { readonly message: Message; readonly problems: readonly Problem[] } {
     const now = this.clock.now();
-    const { body, problems } = prepareBody(this.model, message, written, this.rng, now);
+
+    // A pinned version sends the shape the message had then, which `@since` records. Without
+    // this an `upcast` could never be exercised: nothing else in a scenario can arrange for a
+    // producer that has not caught up.
+    const at = options.version === undefined ? undefined : parseVersion(options.version);
+    const asDeclared = at === undefined ? message : { ...message, fields: shapeAt(message, at) };
+
+    const { body, problems } = prepareBody(this.model, asDeclared, written, this.rng, now);
+    const version = options.version ?? message.version;
     const envelope = prepareEnvelope(this.model, message, options.envelope ?? {}, this.rng, now);
 
     const sent: Message = {
       envelope: {
         id: this.rng.uuid(),
         type: qualify(message.id),
-        ...(message.version === undefined ? {} : { version: message.version }),
+        ...(version === undefined ? {} : { version }),
         time: now,
         fields: envelope,
       },
@@ -572,10 +583,15 @@ export class Engine {
       return;
     }
 
+    // Translation before validation, because an older message is not yet in the shape the
+    // consumer's contract describes. `upcast` exists for this and for nothing else
+    // (`docs/spec/02-contract.md` section 5.4).
+    const translated = this.upcast(delivery);
+
     // Validation on receipt, after normalization — where generated code does it
     // (`docs/spec/01-kernel.md` section 3). Also never retried: the payload will not
     // improve on a second attempt.
-    const invalid = this.invalidities(message);
+    const invalid = this.invalidities(translated);
     if (invalid.length > 0) {
       delivery.settled = true;
       this.trace.record({
@@ -593,11 +609,11 @@ export class Engine {
 
     const handler = this.live.get(subscription.service.id.name);
     if (handler !== undefined) {
-      await this.runLive(delivery, handler);
+      await this.runLive({ ...delivery, message: translated }, handler);
       return;
     }
 
-    const outcome = this.mockOutcome(subscription, message);
+    const outcome = this.mockOutcome(subscription, translated);
 
     if (outcome.o === "hang") {
       // Nothing is scheduled but the acknowledgement deadline, so the broker will
@@ -613,8 +629,8 @@ export class Engine {
 
     delivery.settled = true;
     this.trace.record({ ...this.where(delivery), kind: "handled" });
-    this.emitReply(subscription, message, outcome.message, outcome.payload, outcome.afterMs);
-    this.observed(subscription, message);
+    this.emitReply(subscription, translated, outcome.message, outcome.payload, outcome.afterMs);
+    this.observed(subscription, translated);
 
     // `reply X then fail`: the reply is observable *and* the message is redelivered,
     // which is how at-least-once duplication gets exercised against a dedup key.
@@ -652,6 +668,50 @@ export class Engine {
       // observable to everything downstream.
       this.failed(delivery, "failed", error instanceof Error ? error.message : String(error));
     }
+  }
+
+  /**
+   * Brings a message up to the version its consumer understands.
+   *
+   * Returns the message unchanged when it already carries the declared version, which is the
+   * ordinary case. A chain that cannot complete leaves the body where it got to and says so:
+   * validation then rejects it, which is the honest outcome — a half-applied migration produces
+   * a shape that is neither version.
+   */
+  private upcast(delivery: Delivery): Message {
+    const { message } = delivery;
+    const decl = this.messages.get(message.envelope.type);
+    if (decl === undefined || decl.version === undefined) return message;
+    if (message.envelope.version === undefined) return message;
+
+    const carried = parseVersion(message.envelope.version);
+    const understood = parseVersion(decl.version);
+    if (carried === undefined || understood === undefined) return message;
+    if (carried.major === understood.major && carried.minor === understood.minor) return message;
+
+    const { body, through, gap } = applyUpcasts(this.model, decl, message.body, carried, understood);
+
+    if (gap !== undefined) {
+      this.notes.push(
+        `\`${message.envelope.type}\` arrived as v${message.envelope.version} and the consumer ` +
+          `understands v${decl.version}, but ${gap}`,
+      );
+    }
+
+    if (through.length === 0) return message;
+
+    this.trace.record({
+      ...this.where(delivery),
+      kind: "upcast",
+      detail: `v${message.envelope.version} to v${through.join(" to v")}`,
+      body,
+    });
+
+    return {
+      ...message,
+      envelope: { ...message.envelope, version: through.at(-1)! },
+      body,
+    };
   }
 
   /** Every way a body fails its own contract, as a consumer would find them. */

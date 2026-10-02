@@ -58,6 +58,7 @@ And the Process layer:
 | It models | Because |
 |---|---|
 | a `send`'s payload, from `state`, `occurrence` and `terminal` | a step that cannot say the charge is for the order total cannot describe a correct saga |
+| `upcast`, chained and applied on receipt | an older producer is the case versioning exists for, and a scenario pins the version to arrange it |
 | saga instances keyed by business key | two messages with the same key reach the same instance, which is what makes a duplicate start idempotent |
 | steps, their `on` actions and their state | the checker can prove `chargeId` is set before an `undo` reads it, and so can a run |
 | step timeouts and the saga `deadline` | one bounds a wait, the other bounds the process; a saga with neither is unbounded |
@@ -171,7 +172,7 @@ debugger or a graph view needs to watch one message move at a time.
 
 ```
 npm install
-npm test        # 139 tests
+npm test        # 147 tests
 npm run build
 npx tsx src/cli.ts run ../7K/examples/soldout.scenario.7k
 ```

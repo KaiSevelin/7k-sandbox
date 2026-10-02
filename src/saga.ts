@@ -112,7 +112,7 @@ const showSource = (a: AssignIr): string => {
   const source = a.source;
   if (source.from === "literal") return JSON.stringify(source.value);
   if (source.from === "absent") return "absent";
-  return `${source.from}.${source.path.join(".")}`;
+  return source.from === "path" ? source.path.join(".") : `${source.from}.${source.path.join(".")}`;
 };
 
 export class Sagas {
@@ -506,7 +506,8 @@ export class Sagas {
       return undefined;
     }
 
-    if (source.from !== "state") return undefined;
+    // A bare path in a `send` block reads the instance, which is the only thing in hand.
+    if (source.from !== "state" && source.from !== "path") return undefined;
 
     return source.path.reduce<JsonValue | undefined>(
       (acc, segment) =>
