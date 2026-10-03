@@ -39,6 +39,7 @@ import {
   type MockRule,
   type Outcome,
   type PipeIr,
+  type Publication,
   type ReactIr,
   type Ref,
   type Scenario,
@@ -305,6 +306,58 @@ export class Engine {
     }
   }
 
+  /**
+   * What the `emits` clause behind a publication declared (`03-topology.md` 2.9).
+   *
+   * Looked up rather than threaded through every call site, because a publication reaches this engine by
+   * four routes — a scenario, a reply, a saga's send and a schedule's — and only some of them have an
+   * `EmitIr` in hand. A scenario's own publish has no clause and so is atomic: a scenario is not a
+   * service, and inventing a loss for it would be inventing a failure nobody declared.
+   */
+  private publicationOf(from: string, messageType: string, pipe: PipeIr): Publication {
+    const service = this.model.decls.find(
+      (d) => d.kind === "service" && qualify(d.id) === from,
+    ) as ServiceIr | undefined;
+    if (service === undefined) return "atomic";
+
+    for (const emit of service.emits) {
+      const message = this.model.resolve(emit.message);
+      const target = this.model.resolve(emit.pipe);
+      if (message === undefined || target === undefined) continue;
+      if (qualify(message) !== messageType) continue;
+      if (symbolKey(target.pkg, target.name) !== symbolKey(pipe.id.pkg, pipe.id.name)) continue;
+      return emit.publication;
+    }
+    return "atomic";
+  }
+
+  /**
+   * Whether this publication is lost before it happens.
+   *
+   * Only under chaos, like the `at-most-once` loss it is the sibling of: a declaration that something may
+   * be lost is not a promise that it will be, and a suite where every best-effort emit vanished one run in
+   * twenty would be a suite nobody could read.
+   */
+  private publicationLost(message: Message, pipe: PipeIr): boolean {
+    if (!this.chaos) return false;
+    if (this.publicationOf(message.from, message.envelope.type, pipe) !== "best-effort") return false;
+    if (!this.rng.chance(20)) return false;
+
+    this.trace.record({
+      ...this.at({
+        message: message.envelope.type,
+        pipe: qualify(pipe.id),
+        ...senderOf(message.from),
+        id: message.envelope.id,
+        detail:
+          "`best-effort`, and the publication was lost although the work completed — so there is no dead " +
+          "letter holding it and no redelivery coming",
+      }),
+      kind: "unpublished",
+    });
+    return true;
+  }
+
   private subscriptionsFor(pipe: PipeIr): Subscription[] {
     return this.subscriptions.filter(
       (s) => s.pipe.id.name === pipe.id.name && s.pipe.id.pkg === pipe.id.pkg,
@@ -377,6 +430,8 @@ export class Engine {
     // three hops away.
     if (options.checked !== false && problems.length > 0) return { message: sent, problems };
 
+    if (this.publicationLost(sent, pipe)) return { message: sent, problems: [] };
+
     this.trace.record({
       ...this.at({
         message: sent.envelope.type,
@@ -435,6 +490,10 @@ export class Engine {
       // envelope data rather than as a credential (`04-process.md` 1.8).
       claims,
     };
+
+    // Nothing was published, so there is no id to hand back: `sendFrom` answers with the id of the
+    // message it put on the pipe, and it did not put one there.
+    if (this.publicationLost(sent, pipe)) return undefined;
 
     this.trace.record({
       ...this.at({
@@ -1043,6 +1102,8 @@ export class Engine {
         return;
 
       case "emit":
+        // Before the `published` event, because a publication that did not happen was never published.
+        if (this.publicationLost(event.message, event.pipe)) return;
         this.trace.record({
           ...this.at({
             message: event.message.envelope.type,

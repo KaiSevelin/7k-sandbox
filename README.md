@@ -53,6 +53,7 @@ conformance suite worthless, so there is exactly one place that decides.
 | envelope propagation and `@derive(inbound.id)` | a correlation chain has to survive a hop |
 | `retry n after d linear max d` | the declared policy, read from the IR rather than re-parsed |
 | an acknowledgement deadline | a handler that never answers has not acknowledged, so a broker redelivers |
+| a `best-effort` publication lost, under `chaos` | a message that was never published leaves no dead letter and no redelivery, so it is the one loss nothing else in a trace would show |
 
 And the Process layer:
 
@@ -180,7 +181,7 @@ debugger or a graph view needs to watch one message move at a time.
 
 ```
 npm install
-npm test        # 162 tests
+npm test        # 166 tests
 npm run build
 npx tsx src/cli.ts run ../7K/examples/soldout.scenario.7k
 ```
