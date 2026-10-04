@@ -160,7 +160,8 @@ One event per line: `published`, `delivered`, `filtered`, `deduplicated`, `handl
 `saga-advanced`, `saga-timeout`, `saga-completed`, `saga-rejected`, `saga-abandoned`,
 `saga-compensating`, `saga-irreversible`, `schedule-fired`, `schedule-overrun` and `schedule-missed`.
 Each `reason` is a code rather than prose, so `expect rejected M at S reason unauthorized` can match
-one; the prose is in `detail`.
+one; the prose is in `detail`. A saga event names its step in `step` — data, because `detail` is for a
+reader and a consumer that parsed it would break when the wording improved.
 
 ## As a library
 
@@ -182,7 +183,7 @@ debugger or a graph view needs to watch one message move at a time.
 
 ```
 npm install
-npm test        # 180 tests
+npm test        # 183 tests
 npm run build
 npx tsx src/cli.ts run ../7K/examples/soldout.scenario.7k
 ```

@@ -102,6 +102,67 @@ describe.skipIf(!present)("the trace this runtime writes", () => {
     expect(bare).toEqual([]);
   });
 
+  it("names the step on every saga event that concerns one", async () => {
+    // The gap Spider found as the saga view's first consumer: the step name existed only inside
+    // `detail`, which this format says is prose and never to be matched on — so the one consumer
+    // that needed it had to parse prose to get it.
+    const needing = new Set([
+      "saga-advanced",
+      "saga-timeout",
+      "saga-compensating",
+      "saga-irreversible",
+    ]);
+    const missing: string[] = [];
+    for (const { name, events } of await everyScenario()) {
+      for (const e of events) {
+        if (needing.has(e.kind) && e.step === undefined) missing.push(`${name}: ${e.kind} #${e.seq}`);
+      }
+    }
+    expect(missing).toEqual([]);
+  });
+
+  it("names the step a terminal ended in, and none when a deadline ended it", async () => {
+    // Both halves matter. `step` present is what says "this step failed"; `step` absent is what says
+    // "the clock ran out while it was waiting" — and section 7.4's completion rule needs the
+    // difference to be decidable rather than guessed.
+    const terminals = (await everyScenario())
+      .flatMap((s) => s.events)
+      .filter((e) => e.kind === "saga-rejected" || e.kind === "saga-abandoned");
+    expect(terminals.length).toBeGreaterThan(0);
+
+    for (const e of terminals) {
+      // A step's action rejected, or the deadline abandoned. Nothing else reaches these kinds, so a
+      // rejection with no step would mean the runtime lost track of where it was.
+      if (e.kind === "saga-rejected") expect(e.step, `#${e.seq}`).toBeDefined();
+    }
+  });
+
+  it("writes a trace from which completion is derivable, and agrees with its own unwinding", async () => {
+    // The invariant that found the bug. `undo` runs for a step that completed and must not run for
+    // one that did not, so over a real trace the compensated steps nest inside the completed ones —
+    // where "completed" is section 7.4's rule and not simply "a `saga-advanced` named it".
+    for (const { name, events } of await everyScenario()) {
+      const keys = [...new Set(events.filter((e) => e.sagaKey !== undefined).map((e) => e.sagaKey!))];
+      for (const key of keys) {
+        const mine = events.filter((e) => e.sagaKey === key);
+        const endedIn = mine.find(
+          (e) =>
+            e.kind === "saga-completed" || e.kind === "saga-rejected" || e.kind === "saga-abandoned",
+        )?.step;
+        const completed = new Set(
+          mine.filter((e) => e.kind === "saga-advanced" && e.step !== endedIn).map((e) => e.step!),
+        );
+        for (const e of mine) {
+          if (e.kind !== "saga-compensating" && e.kind !== "saga-irreversible") continue;
+          expect(
+            [...completed],
+            `${name}/${key}: unwound \`${e.step}\` which the rule says did not complete`,
+          ).toContain(e.step);
+        }
+      }
+    }
+  });
+
   it("emits no kind the format does not define", async () => {
     const kinds = new Set((await everyScenario()).flatMap((s) => s.events.map((e) => e.kind)));
     expect([...kinds].filter((k) => !TRACE_KINDS.includes(k))).toEqual([]);

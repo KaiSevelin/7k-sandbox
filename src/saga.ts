@@ -312,7 +312,11 @@ export class Sagas {
           const key = this.keyOf(message, awaited.keyedBy);
           if (key === undefined || key !== instance.key) continue;
 
-          this.trace(instance, "saga-advanced", { message: message.envelope.type, detail: step.name });
+          this.trace(instance, "saga-advanced", {
+          message: message.envelope.type,
+          step: step.name,
+          detail: step.name,
+        });
           this.act(instance, step, awaited.action, message);
           return;
         }
@@ -378,7 +382,10 @@ export class Sagas {
           // same stage, and the timer it armed must not fire on it.
           if (instance.status !== "running") return;
           if (instance.stage !== stage || instance.doneInStage.has(step.name)) return;
-          this.trace(instance, "saga-timeout", { detail: `${step.name} after ${timeout.afterMs}ms` });
+          this.trace(instance, "saga-timeout", {
+            step: step.name,
+            detail: `${step.name} after ${timeout.afterMs}ms`,
+          });
           this.act(instance, step, timeout.action, undefined);
         });
         instance.stepTimers.set(step.name, timer);
@@ -487,12 +494,12 @@ export class Sagas {
         return;
 
       case "reject":
-        this.terminate(instance, "reject", action.reason);
+        this.terminate(instance, "reject", action.reason, step.name);
         return;
 
       case "abandon":
         // `abandon` takes no reason in the grammar; the step that abandoned is the reason.
-        this.terminate(instance, "abandon", `abandoned in ${step.name}`);
+        this.terminate(instance, "abandon", `abandoned in ${step.name}`, step.name);
         return;
     }
   }
@@ -595,7 +602,19 @@ export class Sagas {
    * nothing to reverse. That asymmetry is the property a saga test exists to check, so it
    * is implemented here and nowhere else.
    */
-  private terminate(instance: Instance, terminal: Terminal, reason?: string): void {
+  private terminate(
+    instance: Instance,
+    terminal: Terminal,
+    reason?: string,
+    /**
+     * The step whose action ended the instance, where one did.
+     *
+     * Absent for a deadline, which ends a saga from outside any step — and that absence is load
+     * bearing: it is how a consumer tells "this step failed" from "the clock ran out while it was
+     * waiting" (`30-scenarios.md` 7.4).
+     */
+    step?: string,
+  ): void {
     if (instance.status !== "running") return;
 
     // Every branch's timer, not one: terminating in the middle of a stage ends its siblings too.
@@ -611,6 +630,7 @@ export class Sagas {
     // The terminal is announced before the unwinding, because that is the causality: it
     // rejected, and *therefore* it compensated.
     this.trace(instance, terminal === "complete" ? "saga-completed" : `saga-${terminal}ed`, {
+      ...(step === undefined ? {} : { step }),
       ...(reason === undefined ? {} : { detail: reason }),
     });
 
@@ -630,14 +650,18 @@ export class Sagas {
       // `undo none` is a deliberate statement that the step cannot be reversed; an
       // absent clause is `uncompensated`, which the checker reports.
       if (step.undo === null) {
-        this.trace(instance, "saga-irreversible", { detail: name });
+        this.trace(instance, "saga-irreversible", { step: name, detail: name });
         continue;
       }
       if (step.undo === undefined) continue;
 
       const message = this.host.model.declFor(step.undo.message);
       if (message?.kind !== "message") continue;
-      this.trace(instance, "saga-compensating", { message: qualify(message.id), detail: name });
+      this.trace(instance, "saga-compensating", {
+        message: qualify(message.id),
+        step: name,
+        detail: name,
+      });
       this.dispatch(instance, step.undo, `undo of ${name}`);
     }
   }
