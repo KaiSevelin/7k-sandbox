@@ -46,6 +46,7 @@ conformance suite worthless, so there is exactly one place that decides.
 | `queue` point-to-point, `topic` and `stream` fan-out | a queue's message is consumed once, so two subscriptions compete for it |
 | `at-least-once` retry then dead-letter; `at-most-once` loss | the delivery guarantee is what decides a failure's fate |
 | `once per <path>`, defaulting to `@role(businessKey)` | a duplicate has to be absorbed somewhere, and the model says where |
+| no key at all for a `@query` | answering a question twice is correct, and the default key would otherwise collapse a second identical read into silence |
 | `where` filters before delivery | a filtered message is never retried and never dead-lettered |
 | `requires` before the handler | a failed claim check cannot succeed on a second attempt |
 | validation and `normalize` on receipt | normalization is what makes equality well-defined across a pipe |
@@ -181,7 +182,7 @@ debugger or a graph view needs to watch one message move at a time.
 
 ```
 npm install
-npm test        # 166 tests
+npm test        # 170 tests
 npm run build
 npx tsx src/cli.ts run ../7K/examples/soldout.scenario.7k
 ```

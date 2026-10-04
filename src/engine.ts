@@ -956,6 +956,13 @@ export class Engine {
     const dedupe = subscription.react.dedupe;
     if (dedupe !== undefined && "none" in dedupe) return undefined;
 
+    // A query carries no key, however many business-key fields it has. It changes nothing, so answering
+    // it twice is correct — and deduplicating one answers the second caller with silence (7k D100). The
+    // default key would otherwise fire on every query, because a query naturally has a business key: it
+    // is the thing being asked about.
+    const asked = this.model.declFor(subscription.react.message);
+    if (asked?.kind === "message" && asked.intent === "query") return undefined;
+
     const path =
       dedupe !== undefined && "by" in dedupe ? dedupe.by : this.businessKeyField(message);
     if (path === undefined) return undefined;
