@@ -449,14 +449,18 @@ function judge(engine: Engine, model: LinkedModel, pkg: string, expect: Expect):
         );
       }
 
-      // `state` is the lifecycle: the step the instance is waiting in, or the terminal
-      // state it reached. Any other property reads a declared `state` field, so an
-      // assertion can check what the saga recorded as well as where it got to.
-      const actual =
-        expect.property.toLowerCase() === "state"
-          ? engine.sagaRuntime!.stateOf(instance)
-          : instance.state[expect.property];
+      // `state` is the lifecycle: a step the instance is waiting in, or the terminal state it
+      // reached. The runtime answers that itself, because a saga inside a `parallel` block is waiting
+      // in more than one step and no single string is the right thing to compare against.
+      if (expect.property.toLowerCase() === "state") {
+        return engine.sagaRuntime!.isIn(instance, expect.value)
+          ? pass()
+          : fail(`found ${engine.sagaRuntime!.stateOf(instance)}`);
+      }
 
+      // Any other property reads a declared `state` field, so an assertion can check what the saga
+      // recorded as well as where it got to.
+      const actual = instance.state[expect.property];
       if (actual === undefined) {
         return fail(`\`${expect.property}\` is not set on this instance`);
       }

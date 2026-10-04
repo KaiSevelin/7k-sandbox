@@ -81,9 +81,22 @@ export interface Instance {
    * language already uses as `on` triggers, so there is one vocabulary rather than two.
    */
   status: "running" | Terminal;
-  /** The step being awaited. Equals `steps.length` once every step has finished. */
-  stepIndex: number;
-  /** Step names that completed, in order, which is what unwinding reads in reverse. */
+  /**
+   * The stage being awaited (`04-process.md` 1.3), past the last one once every step has finished.
+   *
+   * A stage and not a step index because a `parallel` block's branches run at once: the instance waits
+   * for all of them and advances when the last one joins. A sequential saga is the case where every
+   * stage holds one step, so there is one cursor here and not two.
+   */
+  stage: number;
+  /** Which steps of the current stage have completed, which is the join condition. */
+  readonly doneInStage: Set<string>;
+  /**
+   * Step names that completed, in the order they completed, which is what unwinding reads in reverse.
+   *
+   * Completion order, not declaration order. For a sequence the two are the same; for a stage they are
+   * not, and reversing what actually happened is the only one of the two that means anything.
+   */
   readonly completed: string[];
   readonly state: Record<string, JsonValue>;
   readonly startedAt: VirtualTime;
@@ -99,7 +112,8 @@ export interface Instance {
    * 15-minute token, so it does not try to.
    */
   readonly envelope: Readonly<Record<string, JsonValue>>;
-  stepTimer?: ScheduledEvent<unknown> | undefined;
+  /** One timer per awaited step, keyed by name so a branch cancels its own and not its sibling's. */
+  readonly stepTimers: Map<string, ScheduledEvent<unknown>>;
   deadlineTimer?: ScheduledEvent<unknown> | undefined;
   /** True once a step with no timeout is being awaited and no deadline bounds it. */
   unbounded: boolean;
@@ -254,7 +268,9 @@ export class Sagas {
         key,
         ...(saga.version === undefined ? {} : { version: saga.version }),
         status: "running",
-        stepIndex: 0,
+        stage: 0,
+        doneInStage: new Set(),
+        stepTimers: new Map(),
         completed: [],
         state: {},
         startedAt: this.host.now(),
@@ -273,7 +289,7 @@ export class Sagas {
         });
       }
 
-      this.enterStep(instance);
+      this.enterStage(instance);
     }
   }
 
@@ -284,19 +300,22 @@ export class Sagas {
       const hostService = this.hosts.get(qualify(instance.saga.id));
       if (hostService?.id.name !== service.id.name || hostService.id.pkg !== service.id.pkg) continue;
 
-      const step = instance.saga.steps[instance.stepIndex];
-      if (step === undefined) continue;
+      // Every branch of the current stage that has not joined yet: two steps awaiting different
+      // replies can be matched in either order, so there is no single step to consult.
+      for (const step of this.stageSteps(instance)) {
+        if (instance.doneInStage.has(step.name)) continue;
 
-      for (const awaited of step.awaits) {
-        const id = this.host.model.resolve(awaited.message);
-        if (id === undefined || qualify(id) !== message.envelope.type) continue;
+        for (const awaited of step.awaits) {
+          const id = this.host.model.resolve(awaited.message);
+          if (id === undefined || qualify(id) !== message.envelope.type) continue;
 
-        const key = this.keyOf(message, awaited.keyedBy);
-        if (key === undefined || key !== instance.key) continue;
+          const key = this.keyOf(message, awaited.keyedBy);
+          if (key === undefined || key !== instance.key) continue;
 
-        this.trace(instance, "saga-advanced", { message: message.envelope.type, detail: step.name });
-        this.act(instance, step, awaited.action, message);
-        return;
+          this.trace(instance, "saga-advanced", { message: message.envelope.type, detail: step.name });
+          this.act(instance, step, awaited.action, message);
+          return;
+        }
       }
     }
   }
@@ -326,29 +345,49 @@ export class Sagas {
 
   // ---- stepping -------------------------------------------------------------
 
-  private enterStep(instance: Instance): void {
-    const step = instance.saga.steps[instance.stepIndex];
-    if (step === undefined) {
+  /** The steps of the stage the instance is waiting in, in declaration order. */
+  private stageSteps(instance: Instance): readonly StepIr[] {
+    return instance.saga.steps.filter((s) => s.stage === instance.stage);
+  }
+
+  private enterStage(instance: Instance): void {
+    const steps = this.stageSteps(instance);
+    if (steps.length === 0) {
       this.terminate(instance, "complete");
       return;
     }
 
-    if (step.send !== undefined) this.sendStep(instance, step);
+    instance.doneInStage.clear();
 
-    // Timers are keyed and cancellable: a step completing early cancels its own, or a
-    // phantom firing arrives later (`04-process.md` section 2.1).
-    if (step.timeout !== undefined) {
-      const timeout = step.timeout;
-      const index = instance.stepIndex;
-      instance.stepTimer = this.host.timer(this.host.now() + timeout.afterMs, () => {
-        if (instance.status !== "running" || instance.stepIndex !== index) return;
-        this.trace(instance, "saga-timeout", { detail: `${step.name} after ${timeout.afterMs}ms` });
-        this.act(instance, step, timeout.action, undefined);
-      });
-    } else if (instance.saga.deadlineMs === undefined) {
-      // Neither a step timeout nor a deadline: nothing will ever end this wait, which is
-      // exactly what `expect no stuck saga` is asking about.
-      instance.unbounded = true;
+    // Every branch is sent before any reply can be delivered, which is what makes a stage concurrent
+    // rather than a sequence written with extra words. Sends first and timers second, so that a
+    // stage's timeouts all start from the same instant.
+    for (const step of steps) {
+      if (step.send !== undefined) this.sendStep(instance, step);
+    }
+
+    for (const step of steps) {
+      // Timers are keyed and cancellable: a step completing early cancels its own, or a
+      // phantom firing arrives later (`04-process.md` section 2.1).
+      if (step.timeout !== undefined) {
+        const timeout = step.timeout;
+        const stage = instance.stage;
+        const timer = this.host.timer(this.host.now() + timeout.afterMs, () => {
+          // The guard is the stage *and* the branch. A step index needed only one comparison; a
+          // stage needs two, because a branch that joined while its siblings waited is still in the
+          // same stage, and the timer it armed must not fire on it.
+          if (instance.status !== "running") return;
+          if (instance.stage !== stage || instance.doneInStage.has(step.name)) return;
+          this.trace(instance, "saga-timeout", { detail: `${step.name} after ${timeout.afterMs}ms` });
+          this.act(instance, step, timeout.action, undefined);
+        });
+        instance.stepTimers.set(step.name, timer);
+      } else if (instance.saga.deadlineMs === undefined) {
+        // Neither a step timeout nor a deadline: nothing will ever end this wait, which is
+        // exactly what `expect no stuck saga` is asking about. One such branch is enough to hold up
+        // a whole stage, since the stage joins on all of them.
+        instance.unbounded = true;
+      }
     }
   }
 
@@ -427,16 +466,24 @@ export class Sagas {
 
   /** Applies an `on` clause's action. */
   private act(instance: Instance, step: StepIr, action: SagaAction, message: Message | undefined): void {
-    this.host.cancel(instance.stepTimer);
-    instance.stepTimer = undefined;
+    // This branch's timer only: the other branches of the stage are still waiting on theirs.
+    this.host.cancel(instance.stepTimers.get(step.name));
+    instance.stepTimers.delete(step.name);
 
     switch (action.a) {
       case "continue":
         if (message !== undefined) this.assign(instance, action.assigns, message);
         // The step succeeded, so it becomes reversible.
         instance.completed.push(step.name);
-        instance.stepIndex++;
-        this.enterStep(instance);
+        instance.doneInStage.add(step.name);
+
+        // A stage joins when its last branch completes; until then the instance stays where it is and
+        // the siblings keep waiting. A `reject` in any one branch does not wait for the others,
+        // because `terminate` cancels every timer in the stage.
+        if (this.stageSteps(instance).every((s) => instance.doneInStage.has(s.name))) {
+          instance.stage++;
+          this.enterStage(instance);
+        }
         return;
 
       case "reject":
@@ -551,9 +598,10 @@ export class Sagas {
   private terminate(instance: Instance, terminal: Terminal, reason?: string): void {
     if (instance.status !== "running") return;
 
-    this.host.cancel(instance.stepTimer);
+    // Every branch's timer, not one: terminating in the middle of a stage ends its siblings too.
+    for (const timer of instance.stepTimers.values()) this.host.cancel(timer);
+    instance.stepTimers.clear();
     this.host.cancel(instance.deadlineTimer);
-    instance.stepTimer = undefined;
     instance.deadlineTimer = undefined;
     instance.status = terminal;
     instance.endedAt = this.host.now();
@@ -603,7 +651,24 @@ export class Sagas {
    */
   stateOf(instance: Instance): string {
     if (instance.status !== "running") return instance.status;
-    return instance.saga.steps[instance.stepIndex]?.name ?? "running";
+    const waiting = this.stageSteps(instance).filter((s) => !instance.doneInStage.has(s.name));
+    return waiting.length === 0 ? "running" : waiting.map((s) => s.name).join(" + ");
+  }
+
+  /**
+   * Whether a name describes where this instance is, which is what `expect ... .state` asks.
+   *
+   * A terminal name is matched against the status; a step name is matched against the branches still
+   * being awaited. That second half is why this is not equality against `stateOf`: an instance waiting
+   * in a `parallel` block really is in both of its steps, and `state = hold` is a fair thing to assert
+   * about one. Names are case-insensitive in 7K (D40) and both sides here are names.
+   */
+  isIn(instance: Instance, name: string): boolean {
+    const wanted = name.toLowerCase();
+    if (instance.status !== "running") return instance.status.toLowerCase() === wanted;
+    return this.stageSteps(instance).some(
+      (s) => !instance.doneInStage.has(s.name) && s.name.toLowerCase() === wanted,
+    );
   }
 
   /**
