@@ -82,6 +82,16 @@ export {
 } from "./engine.js";
 
 export {
+  asHandler,
+  overProcess,
+  type Delivery,
+  type Outcome,
+  type ProcessHandler,
+  type ProcessOptions,
+  type Ready,
+} from "./process.js";
+
+export {
   runFile,
   runScenario,
   type AssertionResult,

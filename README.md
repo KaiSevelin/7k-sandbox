@@ -105,6 +105,63 @@ What this cannot virtualize is a live handler's own I/O. The sandbox has no idea
 database — that is exactly what "interfaces, not internals" forbids it from knowing — so a real query takes
 real time. Faking a live handler's dependencies is yours; everything *outside* the handler is free.
 
+### A handler in another process, in another language
+
+`overProcess` makes a child process a live handler, so the service running for real can be written in a
+language this runtime has never heard of — and can sit under its own debugger while everything it talks to
+stays mocked.
+
+```ts
+import { overProcess } from "@sevenk/sandbox";
+
+const payments = await overProcess("dotnet", ["run", "--project", "./src/Payments"], {
+  expect: "Payments",
+});
+
+await runScenario(model, file, scenario, { live: new Map([["Payments", payments]]) });
+await payments.close();
+```
+
+**The clock is why this is worth doing rather than publishing to a real broker.** No wall-clock time
+passes while the engine awaits a reply, so stopping on a breakpoint for five minutes does not trip a
+step's `timeout 30s` — as far as the model is concerned, no time has gone by. Against a real broker the
+visibility timeout expires and the message is redelivered while you are still reading a local, which is
+why debugging a saga against one is an exercise in frustration rather than an exercise in debugging.
+
+**Line-framed JSON over stdio.** No port to choose, no firewall to placate, no authentication to get
+wrong, and the process is one you launched — so your debugger is already attached to it. A host writes one
+line to introduce itself, then answers one line per line it is given:
+
+```
+<- {"ready":"Payments"}
+-> {"id":1,"type":"shop.Charge","version":"v1.0","body":{...},"envelope":{...}}
+<- {"id":1,"handled":true,"reply":"Charged","body":{}}
+<- {"id":1,"failed":"the gateway timed out"}
+```
+
+**A delivery carries exactly the handler's parameters.** A generated handler is handed the message, its
+envelope fields and a cancellation token, so that is what crosses — and the things a message also carries
+deliberately do not. No claims, because `requires` was decided before dispatch and sending them would
+invite a handler to decide authorization a second time and differently. No sender and no pipe, because the
+subscription already decided and a handler that could read either could branch on something the model does
+not say. The rule is the whole of the design: anything added is something a handler could branch on that
+the model does not authorize.
+
+**A failure carries only that it failed.** "The gateway timed out" and "the database deadlocked" are the
+same observable to everything downstream, and an exception must never arrive as a reply the model does not
+declare. The engine retries it under the subscription's own policy, exactly as it does for an in-process
+handler that threw.
+
+**A host's standard output is the protocol channel**, which is a real hazard rather than a theoretical
+one: a `println` in a handler would corrupt the stream. A host should redirect its standard output to
+standard error on the way up; a line that is not a frame is reported as the child's own output rather than
+treated as a protocol fault, so the mistake is visible instead of fatal.
+
+The protocol lives here and not in a provider, because it is `Handler` serialised and the `Handler`
+contract is this package's. A language's adapter implements the other end of this one; it does not invent
+an end. `test/process.test.ts` drives it from a twenty-line Node host, which is how it stays honest about
+not being shaped around any particular language.
+
 ## Commands
 
 ```
