@@ -63,6 +63,19 @@ const MODEL_WITH_SENDER = MODEL.replace(
 
 const send = `  at 0s publish Work as Starter { jobId: "J-1" }`;
 
+/**
+ * The same model, with the sender marked as somebody else's.
+ *
+ * This is the ordinary shape of a real system, not an edge case: the thing that puts the first
+ * message on a queue is a storefront, a till, a partner feed — code 7K describes and does not
+ * generate. `03-topology.md` 2.6 marks it `@external`, and the pipe it emits to is a boundary pipe
+ * because of that marking.
+ */
+const MODEL_WITH_EXTERNAL_SENDER = MODEL_WITH_SENDER.replace(
+  "service Starter {",
+  "service Starter @external {",
+);
+
 describe("delivery", () => {
   it("delivers, runs the handler and puts the reply on the declared pipe", async () => {
     const result = await run(
@@ -473,6 +486,42 @@ describe("the composer", () => {
     expect(result.status).toBe("pass");
     expect(result.trace.of("rejected")[0]?.reason).toBe("invalid");
     expect(countOf(result, "retrying")).toBe(0);
+  });
+});
+
+/**
+ * Standing in for code that is not ours.
+ *
+ * A scenario publishes `as` a service the model says emits the message, and at a system's edge that
+ * service is `@external` by definition. If liveness or generation were allowed to come into it here,
+ * a model could not be driven from its own entry point at all — which is what emulating one means.
+ * The marking says 7K does not *generate* it; it does not say the model cannot be run.
+ */
+describe("publishing as a service that is not ours", () => {
+  it("puts the message on the pipe that external service emits to", async () => {
+    const result = await run(
+      MODEL_WITH_EXTERNAL_SENDER,
+      scenario(`  mock Worker { on Work reply Done after 10ms }
+${send}
+  advance 1s
+  expect Work on commands
+  expect Worker handled Work count 1`),
+    );
+
+    expect(result.errors).toEqual([]);
+    expect(result.status).toBe("pass");
+    // Named as the sender in the trace, so a reader can see where it came in.
+    expect(result.trace.of("published")[0]?.service).toBe("t.Starter");
+  });
+
+  it("still validates the payload, because the boundary is where that matters most", async () => {
+    const result = await run(
+      MODEL_WITH_EXTERNAL_SENDER,
+      scenario(`  at 0s publish Work as Starter { jobId: { $invalid: "length" } }
+  advance 1s`),
+    );
+    expect(result.errors.join(" ")).toMatch(/unchecked/);
+    expect(countOf(result, "published")).toBe(0);
   });
 });
 
