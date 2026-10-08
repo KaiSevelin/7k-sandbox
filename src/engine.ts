@@ -705,7 +705,7 @@ export class Engine {
 
     delivery.settled = true;
     this.trace.record({ ...this.where(delivery), kind: "handled" });
-    this.emitReply(subscription, translated, outcome.message, outcome.payload, outcome.afterMs);
+    this.emitReply(subscription, translated, outcome.message, outcome.payload, outcome.afterMs, "mock");
     this.observed(subscription, translated);
 
     // `reply X then fail`: the reply is observable *and* the message is redelivered,
@@ -735,7 +735,7 @@ export class Engine {
       delivery.settled = true;
       this.trace.record({ ...this.where(delivery), kind: "handled" });
       if (result.reply !== undefined) {
-        this.emitReply(subscription, message, result.reply, result.body, 0);
+        this.emitReply(subscription, message, result.reply, result.body, 0, "handler");
       }
       this.observed(subscription, message);
     } catch (error) {
@@ -808,6 +808,15 @@ export class Engine {
     replyName: string | undefined,
     payload: JsonValue | undefined,
     afterMs: number,
+    /**
+     * Who answered, which only the note below cares about — and it cares a great deal.
+     *
+     * A reply that fails its own contract is reported, not rejected, so the note is the whole of how
+     * anybody finds out. It used to say "the mocked reply" either way, which for a live handler — a
+     * real process, in another language, possibly stopped in a debugger — pointed at the scenario when
+     * the fix was in the handler.
+     */
+    source: "mock" | "handler",
   ): void {
     if (replyName === undefined) return; // `reply none`: correctly silent
 
@@ -841,7 +850,8 @@ export class Engine {
     const { body, problems } = prepareBody(this.model, target, written, this.rng, at, inbound.body);
     if (problems.length > 0) {
       this.notes.push(
-        `the mocked reply \`${replyName}\` is not valid against its own contract: ` +
+        `the ${source === "mock" ? "mocked" : "handler's"} reply \`${replyName}\` is not valid ` +
+          "against its own contract: " +
           problems.map((p) => `${p.path}: ${p.message}`).join("; "),
       );
     }

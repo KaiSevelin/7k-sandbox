@@ -112,6 +112,9 @@ process.stdin.on("data", (chunk) => {
         process.stdout.write("a println that should not break anything\\n");
         out(charged);
         break;
+      case "bad":
+        out({ id: d.id, handled: true, reply: "Declined", body: { reason: "" } });
+        break;
       case "decline":
         out({ id: d.id, handled: true, reply: "Declined", body: { reason: "OverLimit" } });
         break;
@@ -331,5 +334,31 @@ describe("a host that cannot be used", () => {
     const payments = await host();
     await payments.close();
     await payments.close();
+  });
+});
+
+/**
+ * A reply that fails its own contract.
+ *
+ * Reported, not rejected — so the note is the whole of how anybody finds out, and it has to point at
+ * the right thing. A live handler in another process, possibly stopped in a debugger, is not a mock,
+ * and a note saying "the mocked reply" sends you to the scenario when the fix is in your code.
+ */
+describe("when the host answers with something invalid", () => {
+  it("says it was the handler's reply, not a mock's", async () => {
+    const payments = await host();
+    try {
+      const result = await run(
+        payments,
+        `  at 0s publish Charge as Teller { orderId: "ORD-9", mode: "bad" }
+  advance 1s`,
+      );
+      const said = result.notes.join(" | ");
+      expect(said).toContain("not valid against its own contract");
+      expect(said).toContain("handler's reply");
+      expect(said).not.toContain("mocked");
+    } finally {
+      await payments.close();
+    }
   });
 });
