@@ -748,9 +748,9 @@ export class Engine {
       }
       this.observed(subscription, message);
     } catch (error) {
-      // The cause is outside the model, so the engine records only that it failed
-      // (D26): "the gateway timed out" and "the database deadlocked" are the same
-      // observable to everything downstream.
+      // The cause is outside the model (D26), so it reaches nothing that could branch on it: no
+      // reply is emitted and the delivery goes to the retry policy. It is kept as the trace's
+      // detail, which is the person reading the run rather than the conversation.
       this.failed(delivery, "failed", error instanceof Error ? error.message : String(error));
     }
   }

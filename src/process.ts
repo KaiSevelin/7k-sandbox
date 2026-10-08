@@ -63,10 +63,14 @@ export interface Delivery {
  * What comes back.
  *
  * Two shapes, because a handler has two outcomes the model knows about: it handled the message, with or
- * without one of its declared replies, or it failed. **A failure carries only that it failed** — D26
- * again: "the gateway timed out" and "the database deadlocked" are the same observable to everything
- * downstream, and an exception must never arrive as a reply the model does not declare. The engine then
- * retries it under the pipe's own policy, which is what a production wrapper would have done.
+ * without one of its declared replies, or it failed.
+ *
+ * **A failure is not a reply.** D26 reads "the gateway timed out" and "the database deadlocked" as the
+ * same observable *from the conversation's point of view*, so what must never happen is that the cause
+ * arrives as something another service can see or branch on. `failed` carries a string anyway, and it
+ * goes where a person reading the run will find it — a trace is not the conversation, and a debugger
+ * with no idea why a handler failed is a debugger nobody uses. The engine then retries under the
+ * pipe's own policy, which is what a production wrapper would have done.
  */
 export type Outcome =
   | {
