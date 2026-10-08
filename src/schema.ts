@@ -302,8 +302,26 @@ export function resolve(
     return out;
   }
 
+  // A decimal literal against a `float`, which is the one place a 7K body cannot say what it means.
+  //
+  // `1.5` lowers to the *string* `"1.5"`, because a `decimal` must never round-trip through a double
+  // (`01-kernel.md` 7.1) and the lexer does not know which kernel the field is. A `float` is a JSON
+  // number, so the string was then rejected — and a scenario had no way at all to write a `float`
+  // field with a fractional part. The field's type is in hand exactly here, which is why this is the
+  // place it can be decided.
+  //
+  // It also lets a quoted `"1.5"` through for a float, which the two forms being indistinguishable
+  // after lowering makes unavoidable. That laxity is a scenario body's, not a payload's: nothing off
+  // a pipe passes through here, and a scenario that wants to claim the string form is rejected says
+  // so with `{ $invalid: "type" }` or `unchecked`.
+  if (spec.kernel === "float" && typeof value === "string" && DECIMAL_LITERAL.test(value)) {
+    return Number(value);
+  }
+
   return value;
 }
+
+const DECIMAL_LITERAL = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
 
 /** `+15m`, `-2h`, `15m`. */
 export function offsetMs(text: string): number {

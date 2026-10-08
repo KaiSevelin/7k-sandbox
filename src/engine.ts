@@ -85,7 +85,10 @@ export interface EngineOptions {
   readonly start?: VirtualTime;
   /** Spontaneous loss and reordering, within what each pipe's guarantee permits. */
   readonly chaos?: boolean;
-  /** Services to run for real, by declared name. Everything else is mocked. */
+  /**
+   * Services to run for real, keyed by qualified name (`shop.Desk`) or by the bare one (`Desk`).
+   * Everything else is mocked.
+   */
   readonly live?: ReadonlyMap<string, Handler>;
   /** How long an unacknowledged delivery waits before it is redelivered. */
   readonly ackTimeoutMs?: number;
@@ -683,7 +686,13 @@ export class Engine {
     this.trace.record({ ...this.where(delivery), kind: "delivered", attempt });
     if (key !== undefined) subscription.seen.add(key);
 
-    const handler = this.live.get(subscription.service.id.name);
+    // Either spelling, qualified first. Two packages may each declare a `Desk`, and a bare name
+    // would then run one service's code for the other's deliveries — so the qualified name has to
+    // work, and generated code uses it. The bare one stays because that is what a person typing
+    // `--live Payments` means, and in a one-package model there is nothing to be wrong about.
+    const handler =
+      this.live.get(qualify(subscription.service.id)) ??
+      this.live.get(subscription.service.id.name);
     if (handler !== undefined) {
       await this.runLive({ ...delivery, message: translated }, handler);
       return;

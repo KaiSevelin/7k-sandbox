@@ -115,6 +115,32 @@ describe("a live handler", () => {
     expect(seen.calls).toHaveLength(1);
   });
 
+  /**
+   * The qualified name is the one a generator can use.
+   *
+   * A provider writing `live: new Map([["Payments", ...]])` into a generated example would be
+   * telling the reader to key by a name two packages may both declare, and the engine would then
+   * run one `Payments` for the other's deliveries. So both spellings resolve, and this is the one
+   * that is unambiguous.
+   */
+  it("is found by its qualified name as well as its bare one", async () => {
+    const seen: Seen = { calls: [] };
+    const built = build(
+      MODEL,
+      scenario(`  mock Ledger { on Charged reply Receipt }
+  at 0s publish Charge as Teller { orderId: "ORD-Q", amount: "49.50" }
+  advance 1s
+  expect Charged on events`),
+    );
+
+    const result = await runScenario(built.model, built.file, built.scenarios[0]!, {
+      live: new Map([["shop.Payments", payments(seen, 100)]]),
+    });
+
+    expect(result.status).toBe("pass");
+    expect(seen.calls).toHaveLength(1);
+  });
+
   it("decides the outcome itself, so the branch under test is the handler's own", async () => {
     const run = async (amount: string): Promise<string[]> => {
       const built = build(

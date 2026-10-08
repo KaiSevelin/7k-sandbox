@@ -7,7 +7,7 @@
  * failure the two sharing one resolved type exists to prevent.
  */
 
-import { buildWorkspace, type LinkedModel, type MessageIr } from "@sevenk/core";
+import { buildWorkspace, readJsonBody, type LinkedModel, type MessageIr } from "@sevenk/core";
 import { describe, expect, it } from "vitest";
 import { Rng } from "../src/clock.js";
 import {
@@ -49,9 +49,17 @@ message Tagged v1.0 @event {
   id:  uuid @role(businessKey)
   tag: Tag
 }
+
+// A float beside a decimal, because a scenario writes both the same way and they mean different
+// things. The block near the bottom of this file is about exactly that.
+message Weighed v1.0 @event {
+  id:     uuid @role(businessKey)
+  weight: float
+  price:  Price
+}
 `;
 
-function load(): { model: LinkedModel; order: MessageIr; tagged: MessageIr } {
+function load(): { model: LinkedModel; order: MessageIr; tagged: MessageIr; weighed: MessageIr } {
   const workspace = buildWorkspace([{ path: "m.7k", source: MODEL }]);
   expect(workspace.diagnostics.filter((d) => d.severity === "error")).toEqual([]);
   const find = (name: string): MessageIr => {
@@ -59,7 +67,12 @@ function load(): { model: LinkedModel; order: MessageIr; tagged: MessageIr } {
     if (decl === undefined || decl.kind !== "message") throw new Error(name);
     return decl;
   };
-  return { model: workspace.model, order: find("Order"), tagged: find("Tagged") };
+  return {
+    model: workspace.model,
+    order: find("Order"),
+    tagged: find("Tagged"),
+    weighed: find("Weighed"),
+  };
 }
 
 describe("generation", () => {
@@ -213,6 +226,52 @@ describe("normalization", () => {
     );
     expect(result.problems).toEqual([]);
     expect(result.body.code).toBe("SE");
+  });
+});
+
+/**
+ * A number literal in a scenario body means different things in different fields.
+ *
+ * `1.5` lowers to the string `"1.5"`, because a `decimal` must never round-trip through a double
+ * (`01-kernel.md` 7.1) and the lexer cannot know which kernel the field is. A `float` is a JSON
+ * number, so the string was refused — and a scenario had no way at all to write a `float` field with
+ * a fractional part. The field's type is in hand when the written body is resolved against it, which
+ * is where it is now decided.
+ */
+describe("a decimal literal against a float field", () => {
+  const body = (weight: unknown): Record<string, unknown> => ({
+    id: "00000000-0000-7000-8000-000000000000",
+    weight,
+    price: "1.00",
+  });
+
+  it("is what the language lowers a fractional literal to", () => {
+    // The premise, asserted rather than assumed: this is the value a scenario's `weight: 1.5`
+    // actually becomes, and the reason the rest of this block exists.
+    const written = readJsonBody("{ weight: 1.5, price: 2.50 }");
+    expect(written).toEqual({ value: { weight: "1.5", price: "2.50" } });
+  });
+
+  it("is read as a number, so a scenario can write a float at all", () => {
+    const { model, weighed } = load();
+    const result = prepareBody(model, weighed, body("1.5"), new Rng(1), 0);
+    expect(result.problems).toEqual([]);
+    expect(result.body.weight).toBe(1.5);
+  });
+
+  it("leaves a decimal field as the string it is, which is why the string is there", () => {
+    const { model, weighed } = load();
+    const result = prepareBody(model, weighed, body("1.5"), new Rng(1), 0);
+    expect(result.problems).toEqual([]);
+    expect(result.body.price).toBe("1.00");
+  });
+
+  it("still refuses a string that is not a number", () => {
+    const { model, weighed } = load();
+    const result = prepareBody(model, weighed, body("heavy"), new Rng(1), 0);
+    expect(result.problems.map((p) => `${p.path}: ${p.message}`)).toEqual([
+      "weight: expected a finite float, got a string",
+    ]);
   });
 });
 
