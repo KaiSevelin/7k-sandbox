@@ -102,3 +102,16 @@ export {
 } from "./runner.js";
 
 export { load, run, type LoadResult, type RunReport } from "./load.js";
+
+export {
+  HOSTS,
+  isProcessHost,
+  parseHosts,
+  readHosts,
+  startHosts,
+  type HostSpec,
+  type HostsFile,
+  type Live,
+  type ModuleHost,
+  type ProcessHost,
+} from "./hosts.js";
